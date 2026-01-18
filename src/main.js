@@ -60,12 +60,11 @@ const normalizeImageUrl = (url) => {
     }
     // Upgrade v3 to v4 for better image quality
     normalized = normalized.replace('/v3/', '/v4/');
-    // If URL has no extension and no query params, add .jpg
+    // Add query params for OpenTable resizer (do NOT add .jpg extension - it breaks the URL)
     if (normalized.includes('resizer.otstatic.com') || normalized.includes('photos.otstatic.com')) {
-        const hasExtension = /\.(jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(normalized);
         const hasQueryParams = normalized.includes('?');
-        if (!hasExtension && !hasQueryParams) {
-            normalized = `${normalized}.jpg`;
+        if (!hasQueryParams) {
+            normalized = `${normalized}?width=400&height=400`;
         }
     }
     return normalized;
@@ -1485,6 +1484,7 @@ try {
                     }
 
                     const linkSelectors = [
+                        'a[aria-label="Go to the next page"]',
                         'a[rel="next"]',
                         'a[aria-label*="Next"]',
                         'a[aria-label*="next"]',
