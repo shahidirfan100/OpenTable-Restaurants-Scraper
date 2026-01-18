@@ -12,6 +12,111 @@ const USER_AGENTS = [
     'Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0',
 ];
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+
+const scoreRestaurantCandidate = (value) => {
+    if (!isPlainObject(value)) return 0;
+    let score = 0;
+    if (value.name || value.restaurantName || value.title) score += 3;
+    if (value.rid || value.restaurantId || value.id || value.restaurant_id) score += 2;
+    if (value.profileLink || value.canonicalUrl || value.url || value.slug) score += 2;
+    if (value.priceBand || value.priceRange || value.price) score += 1;
+    if (value.starRating || value.rating || value.reviewScore) score += 1;
+    return score;
+};
+
+// Fallback heuristic for unknown JSON shapes.
+const findBestRestaurantArray = (root, maxDepth = 6) => {
+    const seen = new WeakSet();
+    let best = { items: [], matches: 0, score: 0 };
+
+    const visit = (node, depth) => {
+        if (!node || typeof node !== 'object' || depth > maxDepth) return;
+        if (seen.has(node)) return;
+        seen.add(node);
+
+        if (Array.isArray(node)) {
+            let matches = 0;
+            let score = 0;
+            for (const item of node) {
+                const itemScore = scoreRestaurantCandidate(item);
+                if (itemScore >= 4) matches += 1;
+                score += itemScore;
+            }
+            if (matches > 0 && (matches > best.matches || (matches === best.matches && score > best.score))) {
+                best = { items: node, matches, score };
+            }
+            for (const item of node) visit(item, depth + 1);
+            return;
+        }
+
+        for (const value of Object.values(node)) {
+            visit(value, depth + 1);
+        }
+    };
+
+    visit(root, 0);
+    return best.items;
+};
+
+const extractRestaurantsFromData = (data) => {
+    if (!data || typeof data !== 'object') return { restaurants: [], totalCount: 0 };
+
+    const knownPaths = [
+        data?.data?.search?.restaurants,
+        data?.data?.search?.results,
+        data?.data?.search?.searchResults?.restaurants,
+        data?.data?.availability?.restaurants,
+        data?.search?.restaurants,
+        data?.search?.results,
+        data?.restaurants,
+    ];
+
+    for (const arr of knownPaths) {
+        if (Array.isArray(arr) && arr.length) {
+            const totalCount = data?.data?.search?.totalRestaurantCount
+                || data?.data?.search?.totalResults
+                || data?.data?.search?.total
+                || data?.search?.totalRestaurantCount
+                || data?.search?.totalResults
+                || data?.totalResults
+                || 0;
+            return { restaurants: arr, totalCount };
+        }
+    }
+
+    return { restaurants: findBestRestaurantArray(data), totalCount: 0 };
+};
+
+const pickBestCandidate = (candidates) => {
+    const usable = candidates.filter((candidate) => candidate?.restaurants?.length);
+    if (!usable.length) return { restaurants: [], totalCount: 0, source: null };
+    usable.sort((a, b) => b.restaurants.length - a.restaurants.length || (b.totalCount || 0) - (a.totalCount || 0));
+    return usable[0];
+};
+
+const normalizeRestaurant = (r) => {
+    const id = r?.rid || r?.restaurantId || r?.restaurant_id || r?.id || r?.restaurantID || null;
+    const cuisines = Array.isArray(r?.cuisines) ? r.cuisines : [];
+    const primaryCuisine = cuisines[0]?.name || cuisines[0] || null;
+    const bookingSlots = r?.availabilitySlots || r?.timeslots || r?.slots || r?.availability?.slots || [];
+
+    return {
+        name: r?.name || r?.restaurantName || r?.title || null,
+        cuisine: r?.cuisine?.name || r?.cuisine?.displayName || r?.primaryCuisine || r?.cuisineType || primaryCuisine,
+        price_range: r?.priceBand || r?.priceRange || r?.price || r?.priceCategory || null,
+        rating: r?.starRating || r?.rating || r?.reviewScore || r?.reviewRating || null,
+        reviews_count: r?.reviewCount || r?.reviewsCount || r?.numberOfReviews || r?.review_count || null,
+        neighborhood: r?.neighborhood || r?.location?.neighborhood || r?.address?.neighborhood || null,
+        city: r?.city || r?.location?.city || r?.address?.city || null,
+        booking_slots: Array.isArray(bookingSlots) ? bookingSlots : [],
+        url: r?.profileLink
+            ? `https://www.opentable.com${r.profileLink}`
+            : r?.canonicalUrl || r?.url || (r?.slug ? `https://www.opentable.com/r/${r.slug}` : null) || (id ? `https://www.opentable.com/r/${id}` : null),
+        image_url: r?.primaryPhoto?.uri || r?.photo?.uri || r?.image?.url || r?.imageUrl || null,
+        restaurant_id: id,
+    };
+};
 
 try {
     const input = (await Actor.getInput()) || {};
@@ -73,7 +178,26 @@ try {
 
         // Block heavy resources for performance
         preNavigationHooks: [
-            async ({ page }) => {
+            async ({ page, request }) => {
+                request.userData.jsonCandidates = [];
+                const responseListener = async (response) => {
+                    const contentType = response.headers()['content-type'] || '';
+                    if (!contentType.includes('application/json')) return;
+                    const url = response.url();
+                    if (!/gql|graphql|search|results|availability|restaurants/i.test(url)) return;
+                    try {
+                        const data = await response.json();
+                        const extracted = extractRestaurantsFromData(data);
+                        if (extracted.restaurants.length) {
+                            request.userData.jsonCandidates.push({ ...extracted, source: url });
+                        }
+                    } catch {
+                        // ignore json parse errors
+                    }
+                };
+                request.userData.responseListener = responseListener;
+                page.on('response', responseListener);
+
                 await page.route('**/*', (route) => {
                     const type = route.request().resourceType();
                     const url = route.request().url();
@@ -94,126 +218,224 @@ try {
         ],
 
         requestHandler: async ({ page, request }) => {
+            const cleanupResponseListener = () => {
+                const listener = request.userData?.responseListener;
+                if (listener) page.off('response', listener);
+            };
+
             log.info(`Processing: ${request.url}`);
 
-            // Wait for page to load
-            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-            await page.waitForTimeout(2000);
-
-            // Try to extract data from __INITIAL_STATE__
-            let restaurants = [];
-            let totalCount = 0;
-
             try {
-                const stateData = await page.evaluate(() => {
-                    const state = window.__INITIAL_STATE__;
-                    if (!state) return null;
+                // Wait for page to load
+                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                await page.waitForFunction(() => window.__INITIAL_STATE__ || window.__NEXT_DATA__ || window.__APOLLO_STATE__, { timeout: 15000 }).catch(() => { });
+                await page.waitForTimeout(2000);
 
-                    // Try different paths for restaurant data
-                    let restaurantData = null;
-                    let total = 0;
+                const extractFromPage = async () => {
+                    return page.evaluate(() => {
+                        const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+                        const scoreCandidate = (value) => {
+                            if (!isPlainObject(value)) return 0;
+                            let score = 0;
+                            if (value.name || value.restaurantName || value.title) score += 3;
+                            if (value.rid || value.restaurantId || value.id || value.restaurant_id) score += 2;
+                            if (value.profileLink || value.canonicalUrl || value.url || value.slug) score += 2;
+                            if (value.priceBand || value.priceRange || value.price) score += 1;
+                            if (value.starRating || value.rating || value.reviewScore) score += 1;
+                            return score;
+                        };
 
-                    // Path 1: lolzViewAll (collection pages)
-                    if (state.lolzViewAll?.searchResults?.restaurants) {
-                        restaurantData = state.lolzViewAll.searchResults.restaurants;
-                        total = state.lolzViewAll.searchResults.totalRestaurantCount || restaurantData.length;
-                    }
-                    // Path 2: search results
-                    else if (state.search?.results) {
-                        restaurantData = state.search.results;
-                        total = state.search.totalResults || restaurantData.length;
-                    }
-                    // Path 3: discovery
-                    else if (state.discovery?.restaurants) {
-                        restaurantData = state.discovery.restaurants;
-                        total = restaurantData.length;
-                    }
-                    // Path 4: availability
-                    else if (state.availability?.restaurants) {
-                        restaurantData = state.availability.restaurants;
-                        total = restaurantData.length;
-                    }
+                        const addCandidate = (candidates, restaurants, totalCount, source) => {
+                            if (Array.isArray(restaurants) && restaurants.length) {
+                                candidates.push({ restaurants, totalCount: totalCount || restaurants.length, source });
+                            }
+                        };
 
-                    return { restaurants: restaurantData, total };
-                });
+                        const extractFromKnownPaths = (state, prefix) => {
+                            if (!state || typeof state !== 'object') return null;
+                            const candidates = [];
+                            const sr = state?.lolzViewAll?.searchResults;
+                            if (sr?.restaurants) addCandidate(candidates, sr.restaurants, sr.totalRestaurantCount, `${prefix}.lolzViewAll.searchResults`);
+                            if (state?.search?.results) addCandidate(candidates, state.search.results, state.search.totalResults, `${prefix}.search.results`);
+                            if (state?.search?.searchResults?.restaurants) {
+                                const searchResults = state.search.searchResults;
+                                addCandidate(candidates, searchResults.restaurants, searchResults.totalRestaurantCount || searchResults.totalResults, `${prefix}.search.searchResults`);
+                            }
+                            if (state?.searchResults?.restaurants) {
+                                const searchResults = state.searchResults;
+                                addCandidate(candidates, searchResults.restaurants, searchResults.totalRestaurantCount || searchResults.totalResults, `${prefix}.searchResults`);
+                            }
+                            if (state?.availability?.restaurants) addCandidate(candidates, state.availability.restaurants, state.availability.totalResults, `${prefix}.availability.restaurants`);
+                            if (state?.discovery?.restaurants) addCandidate(candidates, state.discovery.restaurants, state.discovery.totalResults, `${prefix}.discovery.restaurants`);
+                            return candidates.sort((a, b) => b.restaurants.length - a.restaurants.length)[0] || null;
+                        };
 
-                if (stateData?.restaurants) {
-                    restaurants = stateData.restaurants;
-                    totalCount = stateData.total;
-                    log.info(`Found ${restaurants.length} restaurants in __INITIAL_STATE__ (total: ${totalCount})`);
-                }
-            } catch (err) {
-                log.warning(`Failed to extract __INITIAL_STATE__: ${err.message}`);
-            }
+                        const findBestRestaurantArray = (root, maxDepth = 6) => {
+                            const seen = new WeakSet();
+                            let best = { items: [], matches: 0, score: 0 };
 
-            // If we need more restaurants and there are more available, scroll to load
-            if (restaurants.length < RESULTS_WANTED && restaurants.length < totalCount) {
-                log.info('Scrolling to load more restaurants...');
+                            const visit = (node, depth) => {
+                                if (!node || typeof node !== 'object' || depth > maxDepth) return;
+                                if (seen.has(node)) return;
+                                seen.add(node);
 
-                let previousCount = restaurants.length;
-                let scrollAttempts = 0;
-                const maxScrolls = 20;
+                                if (Array.isArray(node)) {
+                                    let matches = 0;
+                                    let score = 0;
+                                    for (const item of node) {
+                                        const itemScore = scoreCandidate(item);
+                                        if (itemScore >= 4) matches += 1;
+                                        score += itemScore;
+                                    }
+                                    if (matches > 0 && (matches > best.matches || (matches === best.matches && score > best.score))) {
+                                        best = { items: node, matches, score };
+                                    }
+                                    for (const item of node) visit(item, depth + 1);
+                                    return;
+                                }
 
-                while (scrollAttempts < maxScrolls && saved + restaurants.length < RESULTS_WANTED) {
-                    await page.evaluate(() => {
-                        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-                    });
-                    await page.waitForTimeout(1500);
+                                for (const value of Object.values(node)) {
+                                    visit(value, depth + 1);
+                                }
+                            };
 
-                    // Re-extract data after scroll
-                    const newData = await page.evaluate(() => {
-                        const state = window.__INITIAL_STATE__;
-                        if (state?.lolzViewAll?.searchResults?.restaurants) {
-                            return state.lolzViewAll.searchResults.restaurants;
+                            visit(root, 0);
+                            return best.items;
+                        };
+
+                        const candidates = [];
+                        const initialState = window.__INITIAL_STATE__ || window.__PRELOADED_STATE__;
+                        if (initialState) {
+                            const known = extractFromKnownPaths(initialState, 'initial_state');
+                            if (known) candidates.push(known);
                         }
-                        if (state?.search?.results) return state.search.results;
-                        return null;
+
+                        let nextData = window.__NEXT_DATA__ || null;
+                        if (!nextData) {
+                            const nextDataEl = document.getElementById('__NEXT_DATA__');
+                            if (nextDataEl?.textContent) {
+                                try {
+                                    nextData = JSON.parse(nextDataEl.textContent);
+                                } catch {
+                                    nextData = null;
+                                }
+                            }
+                        }
+
+                        const nextState = nextData?.props?.pageProps?.initialState
+                            || nextData?.props?.pageProps?.state
+                            || nextData?.props?.pageProps
+                            || nextData?.props?.initialState
+                            || null;
+
+                        if (nextState) {
+                            const known = extractFromKnownPaths(nextState, 'next_data');
+                            if (known) candidates.push(known);
+                        }
+
+                        const apolloState = window.__APOLLO_STATE__
+                            || nextData?.props?.pageProps?.apolloState
+                            || nextData?.props?.pageProps?.initialApolloState
+                            || nextData?.props?.pageProps?.__APOLLO_STATE__
+                            || null;
+
+                        if (apolloState && typeof apolloState === 'object') {
+                            const apolloRestaurants = [];
+                            for (const [key, value] of Object.entries(apolloState)) {
+                                const typename = value?.__typename || '';
+                                if ((key && key.startsWith('Restaurant:')) || /restaurant/i.test(typename)) {
+                                    if (scoreCandidate(value) >= 4) apolloRestaurants.push(value);
+                                }
+                            }
+                            addCandidate(candidates, apolloRestaurants, apolloRestaurants.length, 'apollo_state');
+                        }
+
+                        const scanTargets = [initialState, nextData, nextState, apolloState].filter(Boolean);
+                        for (const target of scanTargets) {
+                            const scanned = findBestRestaurantArray(target);
+                            addCandidate(candidates, scanned, scanned.length, 'scan');
+                        }
+
+                        candidates.sort((a, b) => b.restaurants.length - a.restaurants.length || (b.totalCount || 0) - (a.totalCount || 0));
+                        const best = candidates[0] || { restaurants: [], totalCount: 0, source: null };
+                        const bodyText = document.body?.innerText || '';
+                        const blocked = /pardon our interruption|access denied|unusual traffic|are you a robot|captcha/i.test(bodyText)
+                            || /access denied|robot|captcha/i.test(document.title || '');
+
+                        return { ...best, blocked };
                     });
-
-                    if (newData && newData.length > previousCount) {
-                        restaurants = newData;
-                        previousCount = newData.length;
-                        log.info(`Loaded ${restaurants.length} restaurants after scroll`);
-                    } else {
-                        scrollAttempts++;
-                    }
-
-                    if (restaurants.length >= totalCount) break;
-                }
-            }
-
-            // Process and save restaurants
-            const remaining = RESULTS_WANTED - saved;
-            const toProcess = restaurants.slice(0, remaining);
-
-            for (const r of toProcess) {
-                const id = r.rid || r.restaurantId || r.id;
-                if (id && seenIds.has(id)) continue;
-                if (id) seenIds.add(id);
-
-                const item = {
-                    name: r.name || null,
-                    cuisine: r.cuisine?.name || r.primaryCuisine || r.cuisineType || null,
-                    price_range: r.priceBand || r.priceRange || null,
-                    rating: r.starRating || r.rating || null,
-                    reviews_count: r.reviewCount || r.numberOfReviews || null,
-                    neighborhood: r.neighborhood || r.location?.neighborhood || null,
-                    city: r.city || r.location?.city || null,
-                    booking_slots: r.availabilitySlots || r.timeslots || r.slots || [],
-                    url: r.profileLink
-                        ? `https://www.opentable.com${r.profileLink}`
-                        : r.url || (id ? `https://www.opentable.com/r/${id}` : null),
-                    image_url: r.primaryPhoto?.uri || r.photo || r.imageUrl || null,
-                    restaurant_id: id || null,
                 };
 
-                await Dataset.pushData(item);
-                saved++;
+                // Try to extract data from window state or NEXT_DATA
+                const pageData = await extractFromPage();
+                if (pageData.blocked) {
+                    log.warning('Possible anti-bot interstitial detected on the page.');
+                }
 
-                if (saved >= RESULTS_WANTED) break;
+                const responseData = pickBestCandidate(request.userData?.jsonCandidates || []);
+                const bestCandidate = pickBestCandidate([pageData, responseData]);
+
+                let restaurants = bestCandidate.restaurants || [];
+                let totalCount = bestCandidate.totalCount || 0;
+
+                if (restaurants.length) {
+                    log.info(`Found ${restaurants.length} restaurants via ${bestCandidate.source || 'page_state'} (total: ${totalCount || 'unknown'})`);
+                } else {
+                    log.warning('No restaurants found in page state or JSON responses.');
+                }
+
+                // If we need more restaurants, scroll to load more and re-extract
+                const shouldScroll = restaurants.length < RESULTS_WANTED && (totalCount === 0 || restaurants.length < totalCount);
+                if (shouldScroll) {
+                    log.info('Scrolling to load more restaurants...');
+
+                    let previousCount = restaurants.length;
+                    let scrollAttempts = 0;
+                    const maxScrolls = 20;
+
+                    while (scrollAttempts < maxScrolls && saved + restaurants.length < RESULTS_WANTED) {
+                        await page.evaluate(() => {
+                            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                        });
+                        await page.waitForTimeout(1500);
+
+                        const updatedPageData = await extractFromPage();
+                        const updatedResponseData = pickBestCandidate(request.userData?.jsonCandidates || []);
+                        const updatedBest = pickBestCandidate([updatedPageData, updatedResponseData]);
+
+                        if (updatedBest.restaurants?.length > previousCount) {
+                            restaurants = updatedBest.restaurants;
+                            totalCount = updatedBest.totalCount || totalCount;
+                            previousCount = updatedBest.restaurants.length;
+                            log.info(`Loaded ${restaurants.length} restaurants after scroll`);
+                        } else {
+                            scrollAttempts += 1;
+                        }
+
+                        if (totalCount && restaurants.length >= totalCount) break;
+                    }
+                }
+
+                // Process and save restaurants
+                const remaining = RESULTS_WANTED - saved;
+                const toProcess = restaurants.slice(0, remaining);
+
+                for (const r of toProcess) {
+                    const id = r?.rid || r?.restaurantId || r?.restaurant_id || r?.id || null;
+                    if (id && seenIds.has(id)) continue;
+                    if (id) seenIds.add(id);
+
+                    const item = normalizeRestaurant(r);
+                    await Dataset.pushData(item);
+                    saved++;
+
+                    if (saved >= RESULTS_WANTED) break;
+                }
+
+                log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
+            } finally {
+                cleanupResponseListener();
             }
-
-            log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
         },
 
         failedRequestHandler: async ({ request }, error) => {
