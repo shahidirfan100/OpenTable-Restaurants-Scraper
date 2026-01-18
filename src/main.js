@@ -3,6 +3,7 @@ import { Dataset, PlaywrightCrawler } from 'crawlee';
 import { firefox } from 'playwright';
 
 await Actor.init();
+log.setLevel(log.LEVELS.DEBUG);
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0',
@@ -542,23 +543,51 @@ try {
                 request.userData.apiCandidates = [];
                 const responseListener = async (response) => {
                     const url = response.url();
+                    // Log all potential API/XHR candidates for debugging
+                    if (url.includes('/gql') || url.includes('/api/')) {
+                        log.debug(`Inspecting potential API URL: ${url}`);
+                    }
+
                     if (!JSON_RESPONSE_RE.test(url)) return;
+
                     const contentType = response.headers()['content-type'] || '';
-                    if (!contentType.includes('application/json')) return;
+                    if (!contentType.includes('application/json')) {
+                        log.debug(`Skipping ${url} due to content-type: ${contentType}`);
+                        return;
+                    }
+
                     try {
                         const data = await response.json();
                         const extracted = extractRestaurantsFromData(data);
-                        if (!extracted.restaurants.length) return;
-                        if (extracted.restaurants.length < 2) return;
+
+                        log.debug(`Inspecting ${url}: Found ${extracted.restaurants.length} restaurants. TotalCount: ${extracted.totalCount}`);
+
+                        if (!extracted.restaurants.length) {
+                            if (url.includes('graphql') || url.includes('/api/')) {
+                                log.info(`[DEBUG] No restaurants extracted from: ${url}`);
+                                log.debug(`[DEBUG] Root keys: ${Object.keys(data || {}).join(', ')}`);
+                                if (data?.data) log.debug(`[DEBUG] data.data keys: ${Object.keys(data.data).join(', ')}`);
+                            }
+                            return;
+                        }
+                        if (extracted.restaurants.length < 2) {
+                            log.debug(`Skipping ${url}: Too few restaurants (${extracted.restaurants.length})`);
+                            return;
+                        }
 
                         const req = response.request();
                         const template = extractGraphqlTemplate(url, req.method(), req.postData());
                         const score = scoreTemplate(template, extracted);
+
+                        log.info(`Candidate found: ${url} | Score: ${score} | Restaurants: ${extracted.restaurants.length}`);
+
                         if (template && score > 0) {
                             request.userData.apiCandidates.push({ template, extracted, score });
+                        } else {
+                            log.warning(`Candidate rejected due to low score or missing template. Score: ${score}`);
                         }
-                    } catch {
-                        // ignore JSON errors
+                    } catch (err) {
+                        log.debug(`Failed to parse/process JSON from ${url}: ${err.message}`);
                     }
                 };
 
