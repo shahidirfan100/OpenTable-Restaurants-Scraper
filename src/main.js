@@ -86,6 +86,7 @@ const getRestaurantUrl = (value) => {
         || value?.seo?.canonicalPath
         || value?.seo?.url
         || value?.seo?.path
+        || value?.urls?.profileLink?.link
         || value?.url
         || value?.href
         || value?.permalink
@@ -110,6 +111,7 @@ const getRestaurantRating = (value) => value?.starRating
     || value?.reviewSummary?.rating
     || value?.reviewSummary?.averageRating
     || value?.ratingSummary?.rating
+    || value?.statistics?.reviews?.ratings?.overall?.rating
     || null;
 
 const getRestaurantReviewsCount = (value) => value?.reviewCount
@@ -123,6 +125,7 @@ const getRestaurantReviewsCount = (value) => value?.reviewCount
     || value?.reviewSummary?.count
     || value?.reviewSummary?.reviewCount
     || value?.ratingSummary?.count
+    || value?.statistics?.reviews?.allTimeTextReviewCount
     || null;
 
 const getRestaurantImage = (value) => value?.primaryPhoto?.uri
@@ -140,6 +143,7 @@ const getRestaurantImage = (value) => value?.primaryPhoto?.uri
     || (typeof value?.image === 'string' ? value.image : null)
     || value?.imageUrl
     || value?.image_url
+    || value?.photos?.profileV3?.url
     || value?.photos?.[0]?.url
     || value?.images?.[0]?.url
     || null;
@@ -440,6 +444,7 @@ const extractRestaurantsFromData = (data) => {
         data?.data?.searchResults?.results,
         data?.data?.search?.searchResults?.listings,
         data?.data?.availability?.restaurants,
+        data?.multiSearch?.restaurants,
         data?.search?.restaurants,
         data?.search?.results,
         data?.search?.searchResults?.restaurants,
@@ -812,47 +817,47 @@ try {
                             if (slugFromUrl) return `https://www.opentable.com/r/${slugFromUrl}`;
                             return null;
                         };
-const getRestaurantRating = (value) => value?.starRating
-    || value?.rating
-    || value?.reviewScore
-    || value?.reviewRating
-    || value?.reviews?.rating
-    || value?.reviews?.score
-    || value?.reviews?.averageRating
-    || value?.reviewSummary?.rating
-    || value?.reviewSummary?.averageRating
-    || value?.ratingSummary?.rating
-    || null;
-const getRestaurantReviewsCount = (value) => value?.reviewCount
-    || value?.reviewsCount
-    || value?.numberOfReviews
-    || value?.review_count
-    || value?.reviews_count
-    || value?.reviews?.count
-    || value?.reviews?.total
-    || value?.reviews?.reviewCount
-    || value?.reviewSummary?.count
-    || value?.reviewSummary?.reviewCount
-    || value?.ratingSummary?.count
-    || null;
-const getRestaurantImage = (value) => value?.primaryPhoto?.uri
-    || value?.primaryPhoto?.url
-    || value?.photo?.uri
-    || value?.photo?.url
-    || value?.primaryPhotoUrl
-    || value?.heroImageUrl
-    || value?.thumbnailUrl
-    || value?.cardPhoto?.url
-    || value?.cardPhoto?.uri
-    || value?.image?.url
-    || value?.image?.src
-    || (typeof value?.photo === 'string' ? value.photo : null)
-    || (typeof value?.image === 'string' ? value.image : null)
-    || value?.imageUrl
-    || value?.image_url
-    || value?.photos?.[0]?.url
-    || value?.images?.[0]?.url
-    || null;
+                        const getRestaurantRating = (value) => value?.starRating
+                            || value?.rating
+                            || value?.reviewScore
+                            || value?.reviewRating
+                            || value?.reviews?.rating
+                            || value?.reviews?.score
+                            || value?.reviews?.averageRating
+                            || value?.reviewSummary?.rating
+                            || value?.reviewSummary?.averageRating
+                            || value?.ratingSummary?.rating
+                            || null;
+                        const getRestaurantReviewsCount = (value) => value?.reviewCount
+                            || value?.reviewsCount
+                            || value?.numberOfReviews
+                            || value?.review_count
+                            || value?.reviews_count
+                            || value?.reviews?.count
+                            || value?.reviews?.total
+                            || value?.reviews?.reviewCount
+                            || value?.reviewSummary?.count
+                            || value?.reviewSummary?.reviewCount
+                            || value?.ratingSummary?.count
+                            || null;
+                        const getRestaurantImage = (value) => value?.primaryPhoto?.uri
+                            || value?.primaryPhoto?.url
+                            || value?.photo?.uri
+                            || value?.photo?.url
+                            || value?.primaryPhotoUrl
+                            || value?.heroImageUrl
+                            || value?.thumbnailUrl
+                            || value?.cardPhoto?.url
+                            || value?.cardPhoto?.uri
+                            || value?.image?.url
+                            || value?.image?.src
+                            || (typeof value?.photo === 'string' ? value.photo : null)
+                            || (typeof value?.image === 'string' ? value.image : null)
+                            || value?.imageUrl
+                            || value?.image_url
+                            || value?.photos?.[0]?.url
+                            || value?.images?.[0]?.url
+                            || null;
                         const hasRestaurantMeta = (value) => Boolean(
                             value?.priceBand || value?.priceRange || value?.priceCategory || value?.price_range
                             || getRestaurantRating(value) || getRestaurantReviewsCount(value)
