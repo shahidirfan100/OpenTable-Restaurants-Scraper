@@ -12,7 +12,7 @@ const USER_AGENTS = [
 ];
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-const JSON_RESPONSE_RE = /\/dapi\/fe\/gql/i;
+const JSON_RESPONSE_RE = /./i; // permissive, we filter by content-type mainly now
 const IMAGE_EXTENSION_RE = /\.(jpe?g|png|webp|gif)$/i;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_API_PAGES = 200;
@@ -543,16 +543,28 @@ try {
                 request.userData.apiCandidates = [];
                 const responseListener = async (response) => {
                     const url = response.url();
-                    // Log all potential API/XHR candidates for debugging
-                    if (url.includes('/gql') || url.includes('/api/')) {
-                        log.debug(`Inspecting potential API URL: ${url}`);
+                    const contentType = response.headers()['content-type'] || '';
+
+                    // Log ALL JSON responses to find the hidden API
+                    if (contentType.includes('application/json')) {
+                        log.debug(`[DEBUG] Inspecting JSON response from: ${url}`);
                     }
 
-                    if (!JSON_RESPONSE_RE.test(url)) return;
+                    // Keep stricter check for processing
+                    if (!JSON_RESPONSE_RE.test(url) && !url.includes('/api/') && !url.includes('graphql')) {
+                        // If we are desperate, we might want to analyze everything, but for now let's just log it.
+                        return;
+                    }
 
-                    const contentType = response.headers()['content-type'] || '';
+
+                    if (!JSON_RESPONSE_RE.test(url) && !url.includes('/api/') && !url.includes('graphql')) {
+                        // Relaxed: if it's JSON and has restaurants, we might want it even if URL doesn't match RE
+                        // return; // COMMENTED OUT TO DEBUG
+                    }
+
+                    // const contentType = response.headers()['content-type'] || ''; // REMOVED DUPLICATE
                     if (!contentType.includes('application/json')) {
-                        log.debug(`Skipping ${url} due to content-type: ${contentType}`);
+                        // log.debug(`Skipping ${url} due to content-type: ${contentType}`);
                         return;
                     }
 
@@ -616,11 +628,39 @@ try {
                 await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => { });
                 await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => { });
 
+                // STRATEGY 1: Try to extract from window.__INITIAL_STATE__
+                log.info('Attempting to extract restaurants from window.__INITIAL_STATE__...');
+                const initialState = await page.evaluate(() => {
+                    try {
+                        return window.__INITIAL_STATE__;
+                    } catch {
+                        return null;
+                    }
+                });
+
+                if (initialState) {
+                    const extracted = extractRestaurantsFromData(initialState);
+                    if (extracted.restaurants.length > 0) {
+                        log.info(`Found ${extracted.restaurants.length} restaurants in window.__INITIAL_STATE__`);
+                        await pushUnique(extracted.restaurants);
+                        log.info(`Saved ${saved}/${resultsWanted} restaurants from initial state`);
+                    } else {
+                        log.debug('window.__INITIAL_STATE__ found but contained no restaurants');
+                    }
+                } else {
+                    log.debug('window.__INITIAL_STATE__ not found on page');
+                }
+
                 const candidates = Array.isArray(request.userData?.apiCandidates) ? request.userData.apiCandidates : [];
                 candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
                 const best = candidates[0] || null;
+
                 if (!best?.template) {
-                    log.warning('No suitable search API response detected (expected ~50 results).');
+                    if (saved > 0) {
+                        log.info(`Extracted ${saved} restaurants from initial state, but no search API request was intercepted. Pagination might not work.`);
+                        return;
+                    }
+                    log.warning('No suitable search API response detected (expected ~50 results) AND no initial state data found.');
                     return;
                 }
 
@@ -631,8 +671,15 @@ try {
 
                 const firstRestaurants = bestFirstPage?.restaurants || [];
                 if (firstRestaurants.length) {
-                    await pushUnique(firstRestaurants);
-                    log.info(`Saved ${saved}/${resultsWanted} restaurants (API page 1)`);
+                    // Only push if we haven't already saved them (e.g. from window.__INITIAL_STATE__)
+                    // pushUnique handles deduplication natively, so calling it again is safe and helpful
+                    // to ensure we have the best data quality (API might have more fields than initial state)
+                    const added = await pushUnique(firstRestaurants);
+                    if (added > 0) {
+                        log.info(`Saved ${added} new restaurants from API page 1 intercept.`);
+                    } else {
+                        log.info(`API page 1 intercept contained ${firstRestaurants.length} restaurants, but all were already saved from initial state.`);
+                    }
                 }
 
                 let pageSize = derivePageSize(bestTemplate.variables, DEFAULT_PAGE_SIZE);
