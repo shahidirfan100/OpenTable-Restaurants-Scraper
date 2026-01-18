@@ -15,6 +15,14 @@ const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGE
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
 const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
+const normalizeNameKey = (name) => {
+    if (typeof name !== 'string') return null;
+    return name
+        .toLowerCase()
+        .replace(/&/g, ' and ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+};
 const normalizeUrl = (value) => {
     if (!value || typeof value !== 'string') return null;
     const trimmed = value.trim();
@@ -282,42 +290,90 @@ const normalizeRestaurant = (r, detail) => {
     };
 };
 
-const buildRestaurantIndex = (items) => {
+const buildRestaurantIndex = (items, maxPerKey = 8) => {
     const byId = new Map();
     const bySlug = new Map();
     const byName = new Map();
+    const byNameNormalized = new Map();
+
+    const add = (map, key, item) => {
+        if (!key) return;
+        const normalizedKey = String(key).toLowerCase();
+        const list = map.get(normalizedKey) || [];
+        if (list.includes(item)) return;
+        list.push(item);
+        if (list.length > maxPerKey) list.shift();
+        map.set(normalizedKey, list);
+    };
 
     for (const item of items) {
         if (!item || typeof item !== 'object') continue;
         const id = getRestaurantId(item);
-        if (id !== null && id !== undefined) byId.set(String(id), item);
+        if (id !== null && id !== undefined) add(byId, String(id), item);
         const slug = getRestaurantSlug(item);
-        if (slug) bySlug.set(slug.toLowerCase(), item);
+        if (slug) add(bySlug, slug, item);
         const name = getCandidateName(item);
-        if (name) byName.set(name.toLowerCase(), item);
+        if (name) add(byName, name, item);
+        const normalizedName = normalizeNameKey(name);
+        if (normalizedName) add(byNameNormalized, normalizedName, item);
     }
 
-    return { byId, bySlug, byName };
+    return { byId, bySlug, byName, byNameNormalized };
 };
 
 const findRestaurantDetail = (restaurant, index) => {
     if (!restaurant || !index) return null;
+
+    const hasValue = (value) => value !== null && value !== undefined && value !== '';
+    const complementScore = (base, candidate) => {
+        if (!candidate || typeof candidate !== 'object') return 0;
+        let score = 0;
+
+        if (!hasValue(getRestaurantUrl(base)) && hasValue(getRestaurantUrl(candidate))) score += 6;
+        if (!hasValue(getRestaurantImage(base)) && hasValue(getRestaurantImage(candidate))) score += 3;
+        if (!hasValue(getRestaurantRating(base)) && hasValue(getRestaurantRating(candidate))) score += 2;
+        if (!hasValue(getRestaurantReviewsCount(base)) && hasValue(getRestaurantReviewsCount(candidate))) score += 2;
+
+        if (!hasValue(base?.city) && !hasValue(base?.location?.city) && hasValue(candidate?.city || candidate?.location?.city)) score += 1;
+        if (!hasValue(base?.neighborhood) && !hasValue(base?.location?.neighborhood) && hasValue(candidate?.neighborhood || candidate?.location?.neighborhood)) score += 1;
+        if (!hasValue(base?.priceBand) && !hasValue(base?.priceRange) && !hasValue(base?.priceCategory) && hasValue(candidate?.priceBand || candidate?.priceRange || candidate?.priceCategory)) score += 1;
+        if (!hasValue(base?.cuisine) && !hasValue(base?.primaryCuisine) && !hasValue(base?.cuisineType) && hasValue(candidate?.cuisine || candidate?.primaryCuisine || candidate?.cuisineType)) score += 1;
+
+        return score;
+    };
+
+    const candidates = [];
+    const addAll = (list) => {
+        if (!Array.isArray(list)) return;
+        for (const item of list) candidates.push(item);
+    };
+
     const id = getRestaurantId(restaurant);
-    if (id !== null && id !== undefined) {
-        const match = index.byId.get(String(id));
-        if (match) return match;
-    }
+    if (id !== null && id !== undefined) addAll(index.byId.get(String(id)));
     const slug = getRestaurantSlug(restaurant);
-    if (slug) {
-        const match = index.bySlug.get(slug.toLowerCase());
-        if (match) return match;
-    }
+    if (slug) addAll(index.bySlug.get(slug.toLowerCase()));
     const name = getCandidateName(restaurant);
-    if (name) {
-        const match = index.byName.get(name.toLowerCase());
-        if (match) return match;
+    if (name) addAll(index.byName.get(name.toLowerCase()));
+    const normalizedName = normalizeNameKey(name);
+    if (normalizedName) addAll(index.byNameNormalized.get(normalizedName.toLowerCase()));
+
+    if (!candidates.length && normalizedName) {
+        for (const [key, list] of index.byNameNormalized.entries()) {
+            if (!key || !list?.length) continue;
+            if (key.includes(normalizedName) || normalizedName.includes(key)) addAll(list);
+        }
     }
-    return null;
+
+    let best = null;
+    let bestScore = 0;
+    for (const candidate of candidates) {
+        const score = complementScore(restaurant, candidate);
+        if (score > bestScore) {
+            best = candidate;
+            bestScore = score;
+        }
+    }
+    return best;
 };
 
 try {
@@ -384,6 +440,7 @@ try {
         preNavigationHooks: [
             async ({ page, request }) => {
                 request.userData.jsonCandidates = [];
+                request.userData.jsonDetailItems = [];
                 const responseListener = async (response) => {
                     const contentType = response.headers()['content-type'] || '';
                     if (!contentType.includes('application/json')) return;
@@ -394,6 +451,12 @@ try {
                         const extracted = extractRestaurantsFromData(data);
                         if (extracted.restaurants.length) {
                             request.userData.jsonCandidates.push({ ...extracted, source: url });
+                        }
+                        if (extracted.details?.length) {
+                            request.userData.jsonDetailItems.push(...extracted.details);
+                            if (request.userData.jsonDetailItems.length > 1500) {
+                                request.userData.jsonDetailItems = request.userData.jsonDetailItems.slice(-1500);
+                            }
                         }
                     } catch {
                         // ignore json parse errors
@@ -440,6 +503,14 @@ try {
                     return page.evaluate(() => {
                         const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
                         const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
+                        const normalizeNameKey = (name) => {
+                            if (typeof name !== 'string') return null;
+                            return name
+                                .toLowerCase()
+                                .replace(/&/g, ' and ')
+                                .replace(/[^a-z0-9]+/g, ' ')
+                                .trim();
+                        };
                         const normalizeUrl = (value) => {
                             if (!value || typeof value !== 'string') return null;
                             const trimmed = value.trim();
@@ -455,6 +526,7 @@ try {
                             const match = value.match(/\/r\/([^/?#]+)/i);
                             return match?.[1] || null;
                         };
+                        const getRestaurantId = (value) => value?.rid || value?.restaurantId || value?.restaurant_id || value?.id || value?.restaurantID || null;
                         const getRestaurantUrl = (value) => {
                             const rawUrl = value?.profileLink
                                 || value?.links?.profile?.href
@@ -572,6 +644,93 @@ try {
                             visit(root, 0);
                             return items;
                         };
+                        const extractRestaurantCardsFromDom = () => {
+                            const results = [];
+                            const seen = new Set();
+                            const getBestImage = (img) => {
+                                if (!img) return null;
+                                const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
+                                if (srcset) {
+                                    const parts = srcset.split(',').map((part) => part.trim()).filter(Boolean);
+                                    const last = parts[parts.length - 1] || '';
+                                    const url = last.split(' ')[0];
+                                    return normalizeUrl(url) || url || null;
+                                }
+                                return normalizeUrl(img.getAttribute('src') || img.getAttribute('data-src') || '') || null;
+                            };
+                            const parseNumber = (text) => {
+                                if (!text) return null;
+                                const digits = String(text).replace(/[^\d]/g, '');
+                                if (!digits) return null;
+                                return Number(digits);
+                            };
+                            const parseRatingAndReviews = (text) => {
+                                const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+                                if (!cleaned) return { rating: null, reviews_count: null };
+                                const matchParen = cleaned.match(/(\d\.\d)\s*\(\s*([\d,]+)\s*\)/);
+                                if (matchParen) {
+                                    return { rating: Number(matchParen[1]), reviews_count: parseNumber(matchParen[2]) };
+                                }
+                                const ratingMatch = cleaned.match(/(\d\.\d)/);
+                                const reviewsMatch = cleaned.match(/([\d,]+)\s+reviews?/i);
+                                return {
+                                    rating: ratingMatch ? Number(ratingMatch[1]) : null,
+                                    reviews_count: reviewsMatch ? parseNumber(reviewsMatch[1]) : null,
+                                };
+                            };
+
+                            const anchors = Array.from(document.querySelectorAll('main a[href*="/r/"], a[href^="/r/"]'));
+                            for (const a of anchors) {
+                                const href = a.getAttribute('href') || '';
+                                const url = normalizeUrl(href) || null;
+                                if (!url) continue;
+                                const slug = extractSlugFromUrl(url);
+                                if (!slug) continue;
+
+                                const container = a.closest('[data-test*="restaurant"], [data-testid*="restaurant"], article, li, div') || a;
+                                const ridAttr = container.getAttribute('data-rid')
+                                    || container.getAttribute('data-restaurant-id')
+                                    || container.getAttribute('data-restaurantid')
+                                    || container.getAttribute('data-id');
+                                let rid = ridAttr && String(ridAttr).match(/\d+/)?.[0] ? Number(String(ridAttr).match(/\d+/)[0]) : null;
+                                if (!rid) {
+                                    try {
+                                        const parsed = new URL(url);
+                                        const fromQuery = parsed.searchParams.get('rid') || parsed.searchParams.get('restaurantId');
+                                        rid = fromQuery && String(fromQuery).match(/\d+/)?.[0] ? Number(String(fromQuery).match(/\d+/)[0]) : null;
+                                    } catch {
+                                        rid = null;
+                                    }
+                                }
+
+                                const nameEl = container.querySelector('h1, h2, h3, [data-test*="name"], [data-testid*="name"]') || a;
+                                const name = (nameEl?.textContent || '').replace(/\s+/g, ' ').trim();
+                                if (!name || name.length > 140) continue;
+                                const nameKey = normalizeNameKey(name);
+                                const dedupeKey = `${slug}|${nameKey}`;
+                                if (seen.has(dedupeKey)) continue;
+                                seen.add(dedupeKey);
+
+                                const img = container.querySelector('img');
+                                const image_url = getBestImage(img);
+
+                                const ariaText = (container.getAttribute('aria-label') || '')
+                                    + ' ' + (container.querySelector('[aria-label*="rating"], [aria-label*="stars"]')?.getAttribute('aria-label') || '');
+                                const text = `${container.textContent || ''} ${ariaText}`;
+                                const { rating, reviews_count } = parseRatingAndReviews(text);
+
+                                results.push({
+                                    rid,
+                                    name,
+                                    url,
+                                    image_url,
+                                    rating,
+                                    reviews_count,
+                                    slug,
+                                });
+                            }
+                            return results;
+                        };
 
                         const addCandidate = (candidates, restaurants, totalCount, source) => {
                             if (Array.isArray(restaurants) && restaurants.length) {
@@ -686,6 +845,8 @@ try {
                         for (const target of scanTargets) {
                             details.push(...collectDetailItems(target));
                         }
+                        const domDetails = extractRestaurantCardsFromDom();
+                        addCandidate(candidates, domDetails, domDetails.length, 'dom_cards');
                         for (const target of scanTargets) {
                             const scanned = findBestRestaurantArray(target);
                             addCandidate(candidates, scanned, scanned.length, 'scan');
@@ -699,7 +860,7 @@ try {
                         const blocked = /pardon our interruption|access denied|unusual traffic|are you a robot|captcha/i.test(bodyText)
                             || /access denied|robot|captcha/i.test(document.title || '');
 
-                        return { ...best, blocked, details };
+                        return { ...best, blocked, details, domDetails };
                     });
                 };
                 let jsonCandidateOffset = 0;
@@ -724,6 +885,8 @@ try {
 
                     const detailItems = [];
                     if (Array.isArray(pageData.details)) detailItems.push(...pageData.details);
+                    if (Array.isArray(pageData.domDetails)) detailItems.push(...pageData.domDetails);
+                    if (Array.isArray(request.userData?.jsonDetailItems)) detailItems.push(...request.userData.jsonDetailItems);
                     for (const candidate of newCandidates) {
                         if (Array.isArray(candidate.details)) detailItems.push(...candidate.details);
                     }
