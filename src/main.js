@@ -26,6 +26,20 @@ const normalizeUrl = (value) => {
     return null;
 };
 
+const extractSlugFromUrl = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    const match = value.match(/\/r\/([^/?#]+)/i);
+    return match?.[1] || null;
+};
+
+const getRestaurantId = (value) => value?.rid || value?.restaurantId || value?.restaurant_id || value?.id || value?.restaurantID || null;
+const getRestaurantSlug = (value) => {
+    const slug = value?.slug || value?.urlSlug || value?.seo?.slug || value?.seo?.urlSlug;
+    if (typeof slug === 'string' && slug.trim()) return slug.trim();
+    const urlCandidate = value?.profileLink || value?.canonicalUrl || value?.url || value?.href || value?.permalink || value?.path;
+    return extractSlugFromUrl(String(urlCandidate || ''));
+};
+
 const getRestaurantUrl = (value) => {
     const rawUrl = value?.profileLink
         || value?.links?.profile?.href
@@ -114,6 +128,34 @@ const scoreRestaurantList = (restaurants) => {
     return (completeness * 10) + lengthBonus;
 };
 
+const collectDetailItemsFromData = (root, maxDepth = 6, maxItems = 600) => {
+    if (!root || typeof root !== 'object') return [];
+    const seen = new WeakSet();
+    const items = [];
+
+    const visit = (node, depth) => {
+        if (!node || typeof node !== 'object' || depth > maxDepth || items.length >= maxItems) return;
+        if (seen.has(node)) return;
+        seen.add(node);
+
+        if (Array.isArray(node)) {
+            for (const item of node) visit(item, depth + 1);
+            return;
+        }
+
+        if (isLikelyRestaurant(node) && (getRestaurantUrl(node) || getRestaurantRating(node) || getRestaurantReviewsCount(node) || getRestaurantImage(node))) {
+            items.push(node);
+        }
+
+        for (const value of Object.values(node)) {
+            visit(value, depth + 1);
+        }
+    };
+
+    visit(root, 0);
+    return items;
+};
+
 const scoreRestaurantCandidate = (value) => {
     if (!isPlainObject(value) || !isLikelyRestaurant(value)) return 0;
     let score = 0;
@@ -161,7 +203,7 @@ const findBestRestaurantArray = (root, maxDepth = 6) => {
 };
 
 const extractRestaurantsFromData = (data) => {
-    if (!data || typeof data !== 'object') return { restaurants: [], totalCount: 0 };
+    if (!data || typeof data !== 'object') return { restaurants: [], totalCount: 0, details: [] };
 
     const knownPaths = [
         data?.data?.search?.restaurants,
@@ -184,11 +226,11 @@ const extractRestaurantsFromData = (data) => {
                 || data?.search?.totalResults
                 || data?.totalResults
                 || 0;
-            return { restaurants: filtered, totalCount };
+            return { restaurants: filtered, totalCount, details: collectDetailItemsFromData(data) };
         }
     }
 
-    return { restaurants: findBestRestaurantArray(data), totalCount: 0 };
+    return { restaurants: findBestRestaurantArray(data), totalCount: 0, details: collectDetailItemsFromData(data) };
 };
 
 const pickBestCandidate = (candidates) => {
@@ -200,25 +242,82 @@ const pickBestCandidate = (candidates) => {
     return usable[0];
 };
 
-const normalizeRestaurant = (r) => {
-    const id = r?.rid || r?.restaurantId || r?.restaurant_id || r?.id || r?.restaurantID || null;
-    const cuisines = Array.isArray(r?.cuisines) ? r.cuisines : [];
+const normalizeRestaurant = (r, detail) => {
+    const base = r || {};
+    const extra = detail || {};
+    const cuisines = Array.isArray(base?.cuisines) ? base.cuisines : (Array.isArray(extra?.cuisines) ? extra.cuisines : []);
     const primaryCuisine = cuisines[0]?.name || cuisines[0] || null;
-    const bookingSlots = r?.availabilitySlots || r?.timeslots || r?.slots || r?.availability?.slots || [];
+    const bookingSlots = base?.availabilitySlots || base?.timeslots || base?.slots || base?.availability?.slots
+        || extra?.availabilitySlots || extra?.timeslots || extra?.slots || extra?.availability?.slots
+        || [];
 
     return {
-        name: getCandidateName(r),
-        cuisine: r?.cuisine?.name || r?.cuisine?.displayName || r?.primaryCuisine || r?.cuisineType || r?.cuisine || primaryCuisine,
-        price_range: r?.priceBand || r?.priceRange || r?.price || r?.priceCategory || null,
-        rating: getRestaurantRating(r),
-        reviews_count: getRestaurantReviewsCount(r),
-        neighborhood: r?.neighborhood || r?.location?.neighborhood || r?.address?.neighborhood || null,
-        city: r?.city || r?.location?.city || r?.address?.city || null,
+        name: getCandidateName(base) || getCandidateName(extra),
+        cuisine: base?.cuisine?.name
+            || base?.cuisine?.displayName
+            || base?.primaryCuisine
+            || base?.cuisineType
+            || base?.cuisine
+            || extra?.cuisine?.name
+            || extra?.cuisine?.displayName
+            || extra?.primaryCuisine
+            || extra?.cuisineType
+            || extra?.cuisine
+            || primaryCuisine,
+        price_range: base?.priceBand || base?.priceRange || base?.price || base?.priceCategory
+            || extra?.priceBand || extra?.priceRange || extra?.price || extra?.priceCategory
+            || null,
+        rating: getRestaurantRating(base) || getRestaurantRating(extra),
+        reviews_count: getRestaurantReviewsCount(base) || getRestaurantReviewsCount(extra),
+        neighborhood: base?.neighborhood || base?.location?.neighborhood || base?.address?.neighborhood
+            || extra?.neighborhood || extra?.location?.neighborhood || extra?.address?.neighborhood
+            || null,
+        city: base?.city || base?.location?.city || base?.address?.city
+            || extra?.city || extra?.location?.city || extra?.address?.city
+            || null,
         booking_slots: Array.isArray(bookingSlots) ? bookingSlots : [],
-        url: getRestaurantUrl(r),
-        image_url: getRestaurantImage(r),
-        restaurant_id: id,
+        url: getRestaurantUrl(base) || getRestaurantUrl(extra),
+        image_url: getRestaurantImage(base) || getRestaurantImage(extra),
+        restaurant_id: getRestaurantId(base) || getRestaurantId(extra),
     };
+};
+
+const buildRestaurantIndex = (items) => {
+    const byId = new Map();
+    const bySlug = new Map();
+    const byName = new Map();
+
+    for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const id = getRestaurantId(item);
+        if (id !== null && id !== undefined) byId.set(String(id), item);
+        const slug = getRestaurantSlug(item);
+        if (slug) bySlug.set(slug.toLowerCase(), item);
+        const name = getCandidateName(item);
+        if (name) byName.set(name.toLowerCase(), item);
+    }
+
+    return { byId, bySlug, byName };
+};
+
+const findRestaurantDetail = (restaurant, index) => {
+    if (!restaurant || !index) return null;
+    const id = getRestaurantId(restaurant);
+    if (id !== null && id !== undefined) {
+        const match = index.byId.get(String(id));
+        if (match) return match;
+    }
+    const slug = getRestaurantSlug(restaurant);
+    if (slug) {
+        const match = index.bySlug.get(slug.toLowerCase());
+        if (match) return match;
+    }
+    const name = getCandidateName(restaurant);
+    if (name) {
+        const match = index.byName.get(name.toLowerCase());
+        if (match) return match;
+    }
+    return null;
 };
 
 try {
@@ -348,6 +447,11 @@ try {
                             if (trimmed.includes('opentable.com/')) return `https://${trimmed.replace(/^https?:\/\//, '')}`;
                             return null;
                         };
+                        const extractSlugFromUrl = (value) => {
+                            if (!value || typeof value !== 'string') return null;
+                            const match = value.match(/\/r\/([^/?#]+)/i);
+                            return match?.[1] || null;
+                        };
                         const getRestaurantUrl = (value) => {
                             const rawUrl = value?.profileLink
                                 || value?.links?.profile?.href
@@ -370,6 +474,8 @@ try {
                             if (typeof slug === 'string' && /[a-zA-Z]/.test(slug)) {
                                 return `https://www.opentable.com/r/${slug}`;
                             }
+                            const slugFromUrl = extractSlugFromUrl(String(rawUrl || ''));
+                            if (slugFromUrl) return `https://www.opentable.com/r/${slugFromUrl}`;
                             return null;
                         };
                         const getRestaurantRating = (value) => value?.starRating
@@ -440,6 +546,28 @@ try {
                             ) / total;
                             const lengthBonus = Math.min(total, 50) / 50;
                             return (completeness * 10) + lengthBonus;
+                        };
+                        const collectDetailItems = (root, maxDepth = 6, maxItems = 600) => {
+                            if (!root || typeof root !== 'object') return [];
+                            const seen = new WeakSet();
+                            const items = [];
+                            const visit = (node, depth) => {
+                                if (!node || typeof node !== 'object' || depth > maxDepth || items.length >= maxItems) return;
+                                if (seen.has(node)) return;
+                                seen.add(node);
+                                if (Array.isArray(node)) {
+                                    for (const item of node) visit(item, depth + 1);
+                                    return;
+                                }
+                                if (isLikelyRestaurant(node) && (getRestaurantUrl(node) || getRestaurantRating(node) || getRestaurantReviewsCount(node) || getRestaurantImage(node))) {
+                                    items.push(node);
+                                }
+                                for (const value of Object.values(node)) {
+                                    visit(value, depth + 1);
+                                }
+                            };
+                            visit(root, 0);
+                            return items;
                         };
 
                         const addCandidate = (candidates, restaurants, totalCount, source) => {
@@ -551,6 +679,10 @@ try {
                         }
 
                         const scanTargets = [initialState, nextData, nextState, apolloState].filter(Boolean);
+                        const details = [];
+                        for (const target of scanTargets) {
+                            details.push(...collectDetailItems(target));
+                        }
                         for (const target of scanTargets) {
                             const scanned = findBestRestaurantArray(target);
                             addCandidate(candidates, scanned, scanned.length, 'scan');
@@ -564,7 +696,7 @@ try {
                         const blocked = /pardon our interruption|access denied|unusual traffic|are you a robot|captcha/i.test(bodyText)
                             || /access denied|robot|captcha/i.test(document.title || '');
 
-                        return { ...best, blocked };
+                        return { ...best, blocked, details };
                     });
                 };
 
@@ -579,6 +711,12 @@ try {
 
                 let restaurants = bestCandidate.restaurants || [];
                 let totalCount = bestCandidate.totalCount || 0;
+                const detailItems = [];
+                if (Array.isArray(pageData.details)) detailItems.push(...pageData.details);
+                for (const candidate of request.userData?.jsonCandidates || []) {
+                    if (Array.isArray(candidate.details)) detailItems.push(...candidate.details);
+                }
+                const detailIndex = buildRestaurantIndex(detailItems);
 
                 if (restaurants.length) {
                     log.info(`Found ${restaurants.length} restaurants via ${bestCandidate.source || 'page_state'} (total: ${totalCount || 'unknown'})`);
@@ -627,7 +765,7 @@ try {
                     if (id && seenIds.has(id)) continue;
                     if (id) seenIds.add(id);
 
-                    const item = normalizeRestaurant(r);
+                    const item = normalizeRestaurant(r, findRestaurantDetail(r, detailIndex));
                     await Dataset.pushData(item);
                     saved++;
 
