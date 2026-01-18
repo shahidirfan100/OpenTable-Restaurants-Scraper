@@ -363,6 +363,8 @@ try {
 
     let saved = 0;
     const seenIds = new Set();
+    const seenUrls = new Set();
+    const seenNames = new Set();
 
     const crawler = new PlaywrightCrawler({
         launchContext: {
@@ -428,10 +430,11 @@ try {
             log.info(`Processing: ${request.url}`);
 
             try {
-                // Wait for page to load
-                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-                await page.waitForFunction(() => window.__INITIAL_STATE__ || window.__NEXT_DATA__ || window.__APOLLO_STATE__, { timeout: 15000 }).catch(() => { });
-                await page.waitForTimeout(2000);
+                const waitForResultsReady = async () => {
+                    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                    await page.waitForFunction(() => window.__INITIAL_STATE__ || window.__NEXT_DATA__ || window.__APOLLO_STATE__, { timeout: 15000 }).catch(() => { });
+                    await page.waitForTimeout(2000);
+                };
 
                 const extractFromPage = async () => {
                     return page.evaluate(() => {
@@ -699,80 +702,185 @@ try {
                         return { ...best, blocked, details };
                     });
                 };
+                let jsonCandidateOffset = 0;
+                let warnedBlocked = false;
+                let noProgressPages = 0;
+                let pageNumber = 1;
+                const maxPages = Math.max(3, Math.ceil(RESULTS_WANTED / 50) + 5);
 
-                // Try to extract data from window state or NEXT_DATA
-                const pageData = await extractFromPage();
-                if (pageData.blocked) {
-                    log.warning('Possible anti-bot interstitial detected on the page.');
-                }
-
-                const responseData = pickBestCandidate(request.userData?.jsonCandidates || []);
-                const bestCandidate = pickBestCandidate([pageData, responseData]);
-
-                let restaurants = bestCandidate.restaurants || [];
-                let totalCount = bestCandidate.totalCount || 0;
-                const detailItems = [];
-                if (Array.isArray(pageData.details)) detailItems.push(...pageData.details);
-                for (const candidate of request.userData?.jsonCandidates || []) {
-                    if (Array.isArray(candidate.details)) detailItems.push(...candidate.details);
-                }
-                const detailIndex = buildRestaurantIndex(detailItems);
-
-                if (restaurants.length) {
-                    log.info(`Found ${restaurants.length} restaurants via ${bestCandidate.source || 'page_state'} (total: ${totalCount || 'unknown'})`);
-                } else {
-                    log.warning('No restaurants found in page state or JSON responses.');
-                }
-
-                // If we need more restaurants, scroll to load more and re-extract
-                const shouldScroll = restaurants.length < RESULTS_WANTED && (totalCount === 0 || restaurants.length < totalCount);
-                if (shouldScroll) {
-                    log.info('Scrolling to load more restaurants...');
-
-                    let previousCount = restaurants.length;
-                    let scrollAttempts = 0;
-                    const maxScrolls = 20;
-
-                    while (scrollAttempts < maxScrolls && saved + restaurants.length < RESULTS_WANTED) {
-                        await page.evaluate(() => {
-                            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-                        });
-                        await page.waitForTimeout(1500);
-
-                        const updatedPageData = await extractFromPage();
-                        const updatedResponseData = pickBestCandidate(request.userData?.jsonCandidates || []);
-                        const updatedBest = pickBestCandidate([updatedPageData, updatedResponseData]);
-
-                        if (updatedBest.restaurants?.length > previousCount) {
-                            restaurants = updatedBest.restaurants;
-                            totalCount = updatedBest.totalCount || totalCount;
-                            previousCount = updatedBest.restaurants.length;
-                            log.info(`Loaded ${restaurants.length} restaurants after scroll`);
-                        } else {
-                            scrollAttempts += 1;
-                        }
-
-                        if (totalCount && restaurants.length >= totalCount) break;
+                const collectSnapshot = async () => {
+                    const pageData = await extractFromPage();
+                    if (pageData.blocked && !warnedBlocked) {
+                        warnedBlocked = true;
+                        log.warning('Possible anti-bot interstitial detected on the page.');
                     }
-                }
 
-                // Process and save restaurants
-                const remaining = RESULTS_WANTED - saved;
-                const toProcess = restaurants.slice(0, remaining);
+                    const allCandidates = request.userData?.jsonCandidates || [];
+                    const newCandidates = allCandidates.slice(jsonCandidateOffset);
+                    jsonCandidateOffset = allCandidates.length;
 
-                for (const r of toProcess) {
-                    const id = r?.rid || r?.restaurantId || r?.restaurant_id || r?.id || null;
-                    if (id && seenIds.has(id)) continue;
-                    if (id) seenIds.add(id);
+                    const responseData = pickBestCandidate(newCandidates);
+                    const bestCandidate = pickBestCandidate([pageData, responseData]);
 
-                    const item = normalizeRestaurant(r, findRestaurantDetail(r, detailIndex));
-                    await Dataset.pushData(item);
-                    saved++;
+                    const detailItems = [];
+                    if (Array.isArray(pageData.details)) detailItems.push(...pageData.details);
+                    for (const candidate of newCandidates) {
+                        if (Array.isArray(candidate.details)) detailItems.push(...candidate.details);
+                    }
+                    const detailIndex = buildRestaurantIndex(detailItems);
 
+                    return { bestCandidate, detailIndex };
+                };
+
+                const goToNextPage = async () => {
+                    const currentUrl = page.url();
+                    const gotoUrl = async (href) => {
+                        if (!href) return false;
+                        const nextUrl = new URL(href, currentUrl).href;
+                        if (nextUrl === currentUrl) return false;
+                        await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
+                        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                        await page.waitForTimeout(1500);
+                        return true;
+                    };
+
+                    const clickLocator = async (locator) => {
+                        if (!await locator.count()) return false;
+                        const target = locator.first();
+                        const ariaDisabled = await target.getAttribute('aria-disabled');
+                        const disabled = await target.getAttribute('disabled');
+                        if (ariaDisabled === 'true' || disabled !== null) return false;
+                        const isVisible = await target.isVisible().catch(() => false);
+                        if (!isVisible) return false;
+                        await Promise.all([
+                            target.click({ timeout: 5000 }).catch(() => { }),
+                            page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => { }),
+                        ]);
+                        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                        await page.waitForTimeout(1500);
+                        return true;
+                    };
+
+                    const headNext = page.locator('link[rel="next"]');
+                    if (await headNext.count()) {
+                        const href = await headNext.first().getAttribute('href');
+                        if (await gotoUrl(href)) return true;
+                    }
+
+                    const linkSelectors = [
+                        'a[rel="next"]',
+                        'a[aria-label*="Next"]',
+                        'a[aria-label*="next"]',
+                        'a[data-test*="pagination-next"]',
+                        'a[data-testid*="pagination-next"]',
+                        'a[aria-label*="More"]',
+                    ];
+                    for (const selector of linkSelectors) {
+                        const locator = page.locator(selector);
+                        if (!await locator.count()) continue;
+                        const href = await locator.first().getAttribute('href');
+                        if (href && await gotoUrl(href)) return true;
+                        if (await clickLocator(locator)) return true;
+                    }
+
+                    const buttonSelectors = [
+                        'button[aria-label*="Next"]',
+                        'button[aria-label*="next"]',
+                        'button[data-test*="pagination-next"]',
+                        'button[data-testid*="pagination-next"]',
+                        'button[aria-label*="More"]',
+                    ];
+                    for (const selector of buttonSelectors) {
+                        const locator = page.locator(selector);
+                        if (await clickLocator(locator)) return true;
+                    }
+
+                    return false;
+                };
+
+                while (saved < RESULTS_WANTED && pageNumber <= maxPages) {
+                    await waitForResultsReady();
+                    let snapshot = await collectSnapshot();
+                    let restaurants = snapshot.bestCandidate.restaurants || [];
+                    let totalCount = snapshot.bestCandidate.totalCount || 0;
+                    let detailIndex = snapshot.detailIndex;
+
+                    if (restaurants.length) {
+                        log.info(`Found ${restaurants.length} restaurants via ${snapshot.bestCandidate.source || 'page_state'} (page ${pageNumber}, total: ${totalCount || 'unknown'})`);
+                    } else {
+                        log.warning(`No restaurants found on page ${pageNumber}.`);
+                    }
+
+                    const shouldScroll = restaurants.length < RESULTS_WANTED && (totalCount === 0 || restaurants.length < totalCount);
+                    if (shouldScroll) {
+                        log.info('Scrolling to load more restaurants...');
+
+                        let previousCount = restaurants.length;
+                        let scrollAttempts = 0;
+                        const maxScrolls = 20;
+
+                        while (scrollAttempts < maxScrolls && saved + restaurants.length < RESULTS_WANTED) {
+                            await page.evaluate(() => {
+                                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                            });
+                            await page.waitForTimeout(1500);
+
+                            const updatedSnapshot = await collectSnapshot();
+                            const updatedRestaurants = updatedSnapshot.bestCandidate.restaurants || [];
+
+                            if (updatedRestaurants.length > previousCount) {
+                                restaurants = updatedRestaurants;
+                                totalCount = updatedSnapshot.bestCandidate.totalCount || totalCount;
+                                detailIndex = updatedSnapshot.detailIndex;
+                                previousCount = updatedRestaurants.length;
+                                log.info(`Loaded ${restaurants.length} restaurants after scroll`);
+                            } else {
+                                scrollAttempts += 1;
+                            }
+                        }
+                    }
+
+                    const savedBefore = saved;
+                    for (const r of restaurants) {
+                        const id = getRestaurantId(r);
+                        const url = getRestaurantUrl(r);
+                        const nameKey = getCandidateName(r)?.toLowerCase() || null;
+                        if (id !== null && id !== undefined && seenIds.has(String(id))) continue;
+                        if (!id && url && seenUrls.has(url)) continue;
+                        if (!id && !url && nameKey && seenNames.has(nameKey)) continue;
+
+                        const item = normalizeRestaurant(r, findRestaurantDetail(r, detailIndex));
+                        await Dataset.pushData(item);
+                        saved++;
+
+                        if (id !== null && id !== undefined) seenIds.add(String(id));
+                        if (item.url) seenUrls.add(item.url);
+                        if (item.name) seenNames.add(item.name.toLowerCase());
+
+                        if (saved >= RESULTS_WANTED) break;
+                    }
+
+                    if (saved === savedBefore) {
+                        noProgressPages += 1;
+                    } else {
+                        noProgressPages = 0;
+                    }
+
+                    log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
                     if (saved >= RESULTS_WANTED) break;
-                }
+                    if (totalCount > restaurants.length && saved >= totalCount) break;
+                    if (noProgressPages >= 2) {
+                        log.warning('Pagination stalled with no new restaurants. Stopping.');
+                        break;
+                    }
 
-                log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
+                    const moved = await goToNextPage();
+                    if (!moved) {
+                        log.info('No next page detected. Stopping pagination.');
+                        break;
+                    }
+                    pageNumber += 1;
+                }
             } finally {
                 cleanupResponseListener();
             }
