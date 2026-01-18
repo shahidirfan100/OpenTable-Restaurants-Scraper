@@ -15,16 +15,104 @@ const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGE
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
 const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
-const hasRestaurantUrl = (value) => {
-    const slug = value?.slug;
-    return Boolean(value?.profileLink || value?.canonicalUrl || value?.url || (typeof slug === 'string' && /[a-zA-Z]/.test(slug)));
+const normalizeUrl = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+    if (trimmed.startsWith('//')) return `https:${trimmed}`;
+    if (trimmed.startsWith('/')) return `https://www.opentable.com${trimmed}`;
+    if (trimmed.includes('opentable.com/')) return `https://${trimmed.replace(/^https?:\/\//, '')}`;
+    return null;
 };
+
+const getRestaurantUrl = (value) => {
+    const rawUrl = value?.profileLink
+        || value?.links?.profile?.href
+        || value?.links?.restaurant?.href
+        || value?.urls?.profile
+        || value?.urls?.restaurant
+        || value?.restaurantUrl
+        || value?.restaurant_url
+        || value?.canonicalUrl
+        || value?.canonicalURL
+        || value?.seo?.canonicalUrl
+        || value?.seo?.canonicalURL
+        || value?.url
+        || value?.href
+        || value?.permalink
+        || value?.path;
+    const normalized = normalizeUrl(rawUrl);
+    if (normalized) return normalized;
+
+    const slug = value?.slug || value?.urlSlug || value?.seo?.slug || value?.seo?.urlSlug;
+    if (typeof slug === 'string' && /[a-zA-Z]/.test(slug)) {
+        return `https://www.opentable.com/r/${slug}`;
+    }
+    return null;
+};
+
+const getRestaurantRating = (value) => value?.starRating
+    || value?.rating
+    || value?.reviewScore
+    || value?.reviewRating
+    || value?.reviews?.rating
+    || value?.reviews?.score
+    || value?.reviews?.averageRating
+    || null;
+
+const getRestaurantReviewsCount = (value) => value?.reviewCount
+    || value?.reviewsCount
+    || value?.numberOfReviews
+    || value?.review_count
+    || value?.reviews?.count
+    || value?.reviews?.total
+    || value?.reviews?.reviewCount
+    || null;
+
+const getRestaurantImage = (value) => value?.primaryPhoto?.uri
+    || value?.primaryPhoto?.url
+    || value?.photo?.uri
+    || value?.photo?.url
+    || value?.image?.url
+    || value?.image?.src
+    || value?.imageUrl
+    || value?.image_url
+    || value?.photos?.[0]?.url
+    || value?.images?.[0]?.url
+    || null;
+
 const hasRestaurantMeta = (value) => Boolean(
     value?.priceBand || value?.priceRange || value?.priceCategory
-    || value?.starRating || value?.rating || value?.reviewScore || value?.reviewRating
+    || getRestaurantRating(value) || getRestaurantReviewsCount(value)
     || value?.cuisine || value?.primaryCuisine || value?.cuisines,
 );
-const isLikelyRestaurant = (value) => Boolean(getCandidateName(value) && (hasRestaurantUrl(value) || hasRestaurantMeta(value)));
+const isLikelyRestaurant = (value) => Boolean(getCandidateName(value) && (getRestaurantUrl(value) || hasRestaurantMeta(value)));
+const scoreRestaurantList = (restaurants) => {
+    const total = restaurants.length || 0;
+    if (!total) return 0;
+    let nameCount = 0;
+    let urlCount = 0;
+    let ratingCount = 0;
+    let reviewsCount = 0;
+    let imageCount = 0;
+    for (const item of restaurants) {
+        if (getCandidateName(item)) nameCount += 1;
+        if (getRestaurantUrl(item)) urlCount += 1;
+        if (getRestaurantRating(item)) ratingCount += 1;
+        if (getRestaurantReviewsCount(item)) reviewsCount += 1;
+        if (getRestaurantImage(item)) imageCount += 1;
+    }
+    const completeness = (
+        (urlCount * 4)
+        + (ratingCount * 2)
+        + (reviewsCount * 2)
+        + imageCount
+        + nameCount
+    ) / total;
+    const lengthBonus = Math.min(total, 50) / 50;
+    return (completeness * 10) + lengthBonus;
+};
 
 const scoreRestaurantCandidate = (value) => {
     if (!isPlainObject(value) || !isLikelyRestaurant(value)) return 0;
@@ -106,7 +194,9 @@ const extractRestaurantsFromData = (data) => {
 const pickBestCandidate = (candidates) => {
     const usable = candidates.filter((candidate) => candidate?.restaurants?.length);
     if (!usable.length) return { restaurants: [], totalCount: 0, source: null };
-    usable.sort((a, b) => b.restaurants.length - a.restaurants.length || (b.totalCount || 0) - (a.totalCount || 0));
+    usable.sort((a, b) => scoreRestaurantList(b.restaurants) - scoreRestaurantList(a.restaurants)
+        || b.restaurants.length - a.restaurants.length
+        || (b.totalCount || 0) - (a.totalCount || 0));
     return usable[0];
 };
 
@@ -115,28 +205,18 @@ const normalizeRestaurant = (r) => {
     const cuisines = Array.isArray(r?.cuisines) ? r.cuisines : [];
     const primaryCuisine = cuisines[0]?.name || cuisines[0] || null;
     const bookingSlots = r?.availabilitySlots || r?.timeslots || r?.slots || r?.availability?.slots || [];
-    const profileLink = r?.profileLink;
-    const profileUrl = profileLink
-        ? (profileLink.startsWith('http') ? profileLink : `https://www.opentable.com${profileLink}`)
-        : null;
-    const rawUrl = r?.canonicalUrl || r?.url || null;
-    const normalizedUrl = rawUrl
-        ? (rawUrl.startsWith('http') ? rawUrl : `https://www.opentable.com${rawUrl}`)
-        : null;
-    const slug = typeof r?.slug === 'string' && /[a-zA-Z]/.test(r.slug) ? r.slug : null;
-    const slugUrl = slug ? `https://www.opentable.com/r/${slug}` : null;
 
     return {
         name: getCandidateName(r),
         cuisine: r?.cuisine?.name || r?.cuisine?.displayName || r?.primaryCuisine || r?.cuisineType || r?.cuisine || primaryCuisine,
         price_range: r?.priceBand || r?.priceRange || r?.price || r?.priceCategory || null,
-        rating: r?.starRating || r?.rating || r?.reviewScore || r?.reviewRating || null,
-        reviews_count: r?.reviewCount || r?.reviewsCount || r?.numberOfReviews || r?.review_count || null,
+        rating: getRestaurantRating(r),
+        reviews_count: getRestaurantReviewsCount(r),
         neighborhood: r?.neighborhood || r?.location?.neighborhood || r?.address?.neighborhood || null,
         city: r?.city || r?.location?.city || r?.address?.city || null,
         booking_slots: Array.isArray(bookingSlots) ? bookingSlots : [],
-        url: profileUrl || normalizedUrl || slugUrl,
-        image_url: r?.primaryPhoto?.uri || r?.photo?.uri || r?.image?.url || r?.imageUrl || null,
+        url: getRestaurantUrl(r),
+        image_url: getRestaurantImage(r),
         restaurant_id: id,
     };
 };
@@ -258,16 +338,73 @@ try {
                     return page.evaluate(() => {
                         const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
                         const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
-                        const hasRestaurantUrl = (value) => {
-                            const slug = value?.slug;
-                            return Boolean(value?.profileLink || value?.canonicalUrl || value?.url || (typeof slug === 'string' && /[a-zA-Z]/.test(slug)));
+                        const normalizeUrl = (value) => {
+                            if (!value || typeof value !== 'string') return null;
+                            const trimmed = value.trim();
+                            if (!trimmed) return null;
+                            if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+                            if (trimmed.startsWith('//')) return `https:${trimmed}`;
+                            if (trimmed.startsWith('/')) return `https://www.opentable.com${trimmed}`;
+                            if (trimmed.includes('opentable.com/')) return `https://${trimmed.replace(/^https?:\/\//, '')}`;
+                            return null;
                         };
+                        const getRestaurantUrl = (value) => {
+                            const rawUrl = value?.profileLink
+                                || value?.links?.profile?.href
+                                || value?.links?.restaurant?.href
+                                || value?.urls?.profile
+                                || value?.urls?.restaurant
+                                || value?.restaurantUrl
+                                || value?.restaurant_url
+                                || value?.canonicalUrl
+                                || value?.canonicalURL
+                                || value?.seo?.canonicalUrl
+                                || value?.seo?.canonicalURL
+                                || value?.url
+                                || value?.href
+                                || value?.permalink
+                                || value?.path;
+                            const normalized = normalizeUrl(rawUrl);
+                            if (normalized) return normalized;
+                            const slug = value?.slug || value?.urlSlug || value?.seo?.slug || value?.seo?.urlSlug;
+                            if (typeof slug === 'string' && /[a-zA-Z]/.test(slug)) {
+                                return `https://www.opentable.com/r/${slug}`;
+                            }
+                            return null;
+                        };
+                        const getRestaurantRating = (value) => value?.starRating
+                            || value?.rating
+                            || value?.reviewScore
+                            || value?.reviewRating
+                            || value?.reviews?.rating
+                            || value?.reviews?.score
+                            || value?.reviews?.averageRating
+                            || null;
+                        const getRestaurantReviewsCount = (value) => value?.reviewCount
+                            || value?.reviewsCount
+                            || value?.numberOfReviews
+                            || value?.review_count
+                            || value?.reviews?.count
+                            || value?.reviews?.total
+                            || value?.reviews?.reviewCount
+                            || null;
+                        const getRestaurantImage = (value) => value?.primaryPhoto?.uri
+                            || value?.primaryPhoto?.url
+                            || value?.photo?.uri
+                            || value?.photo?.url
+                            || value?.image?.url
+                            || value?.image?.src
+                            || value?.imageUrl
+                            || value?.image_url
+                            || value?.photos?.[0]?.url
+                            || value?.images?.[0]?.url
+                            || null;
                         const hasRestaurantMeta = (value) => Boolean(
                             value?.priceBand || value?.priceRange || value?.priceCategory
-                            || value?.starRating || value?.rating || value?.reviewScore || value?.reviewRating
+                            || getRestaurantRating(value) || getRestaurantReviewsCount(value)
                             || value?.cuisine || value?.primaryCuisine || value?.cuisines,
                         );
-                        const isLikelyRestaurant = (value) => Boolean(getCandidateName(value) && (hasRestaurantUrl(value) || hasRestaurantMeta(value)));
+                        const isLikelyRestaurant = (value) => Boolean(getCandidateName(value) && (getRestaurantUrl(value) || hasRestaurantMeta(value)));
                         const scoreCandidate = (value) => {
                             if (!isPlainObject(value) || !isLikelyRestaurant(value)) return 0;
                             let score = 0;
@@ -278,6 +415,31 @@ try {
                             if (value.starRating || value.rating || value.reviewScore || value.reviewRating) score += 1;
                             if (value.cuisine || value.primaryCuisine || value.cuisines) score += 1;
                             return score;
+                        };
+                        const scoreRestaurantList = (restaurants) => {
+                            const total = restaurants.length || 0;
+                            if (!total) return 0;
+                            let nameCount = 0;
+                            let urlCount = 0;
+                            let ratingCount = 0;
+                            let reviewsCount = 0;
+                            let imageCount = 0;
+                            for (const item of restaurants) {
+                                if (getCandidateName(item)) nameCount += 1;
+                                if (getRestaurantUrl(item)) urlCount += 1;
+                                if (getRestaurantRating(item)) ratingCount += 1;
+                                if (getRestaurantReviewsCount(item)) reviewsCount += 1;
+                                if (getRestaurantImage(item)) imageCount += 1;
+                            }
+                            const completeness = (
+                                (urlCount * 4)
+                                + (ratingCount * 2)
+                                + (reviewsCount * 2)
+                                + imageCount
+                                + nameCount
+                            ) / total;
+                            const lengthBonus = Math.min(total, 50) / 50;
+                            return (completeness * 10) + lengthBonus;
                         };
 
                         const addCandidate = (candidates, restaurants, totalCount, source) => {
@@ -394,7 +556,9 @@ try {
                             addCandidate(candidates, scanned, scanned.length, 'scan');
                         }
 
-                        candidates.sort((a, b) => b.restaurants.length - a.restaurants.length || (b.totalCount || 0) - (a.totalCount || 0));
+                        candidates.sort((a, b) => scoreRestaurantList(b.restaurants) - scoreRestaurantList(a.restaurants)
+                            || b.restaurants.length - a.restaurants.length
+                            || (b.totalCount || 0) - (a.totalCount || 0));
                         const best = candidates[0] || { restaurants: [], totalCount: 0, source: null };
                         const bodyText = document.body?.innerText || '';
                         const blocked = /pardon our interruption|access denied|unusual traffic|are you a robot|captcha/i.test(bodyText)
