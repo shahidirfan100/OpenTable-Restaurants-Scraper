@@ -394,7 +394,7 @@ const scoreApiTemplate = (template, restaurantsCount, detailsCount = 0) => {
     const opname = String(template.operationName || template.queryParams?.opname || '');
     let score = (restaurantsCount || 0) * 2 + (detailsCount || 0);
     if (/search|availability|results/i.test(opname)) score += 60;
-    if (/home|module|recommend/i.test(opname)) score -= 10;
+    if (/home|module|recommend|homemodulelists/i.test(opname)) score -= 80;
     if (template.method === 'POST') score += 5;
     const variablesString = JSON.stringify(template.variables || {});
     if (/term|search|query|metro|city|location/i.test(variablesString)) score += 10;
@@ -592,7 +592,8 @@ const scoreCandidateSource = (candidate) => {
     const source = String(candidate.source || '');
     let bonus = 0;
     if (/gql|graphql|search|availability|results/i.test(source)) bonus += 5;
-    if (/dom_cards/i.test(source)) bonus -= 5;
+    if (/dom_cards/i.test(source)) bonus += 5;
+    if (/home|module|recommend|homemodulelists/i.test(source)) bonus -= 50;
     return bonus;
 };
 
@@ -1538,7 +1539,7 @@ try {
                 const maxPages = Math.max(3, Math.ceil(RESULTS_WANTED / DEFAULT_PAGE_SIZE) + 5);
 
                 // Merge page state with captured API responses to find the best listing slice.
-                const collectSnapshot = async ({ includeInitialState, useDomDetails }) => {
+                const collectSnapshot = async ({ includeInitialState, useDomDetails, preferPageCandidates }) => {
                     const pageData = await extractFromPage({ includeInitialState, useDomDetails });
                     if (pageData.blocked && !warnedBlocked) {
                         warnedBlocked = true;
@@ -1550,7 +1551,12 @@ try {
                     jsonCandidateOffset = allCandidates.length;
 
                     const responseData = pickBestCandidate(newCandidates);
-                    const bestCandidate = pickBestCandidate([pageData, responseData]);
+                    let bestCandidate = pageData;
+                    if (!bestCandidate.restaurants?.length && responseData.restaurants?.length) {
+                        bestCandidate = responseData;
+                    } else if (!preferPageCandidates) {
+                        bestCandidate = pickBestCandidate([pageData, responseData]);
+                    }
 
                     const detailItems = [];
                     if (Array.isArray(pageData.details)) detailItems.push(...pageData.details);
@@ -1577,7 +1583,21 @@ try {
 
                 // Follow rel=next or pagination controls when available.
                 const goToNextPage = async () => {
+                    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => { });
+                    await page.waitForTimeout(1200);
                     const currentUrl = page.url();
+                    const getActivePageText = async () => {
+                        const locator = page.locator('[aria-current="page"]');
+                        if (!await locator.count()) return null;
+                        return (await locator.first().textContent())?.trim() || null;
+                    };
+                    const previousPageText = await getActivePageText();
+                    const hasPageChanged = async () => {
+                        if (page.url() !== currentUrl) return true;
+                        if (!previousPageText) return false;
+                        const currentPageText = await getActivePageText();
+                        return currentPageText && currentPageText !== previousPageText;
+                    };
                     const gotoUrl = async (href) => {
                         if (!href) return false;
                         const nextUrl = new URL(href, currentUrl).href;
@@ -1585,7 +1605,7 @@ try {
                         await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
                         await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
                         await page.waitForTimeout(1500);
-                        return true;
+                        return hasPageChanged();
                     };
 
                     const clickLocator = async (locator) => {
@@ -1603,7 +1623,7 @@ try {
                         ]);
                         await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
                         await page.waitForTimeout(1500);
-                        return true;
+                        return hasPageChanged();
                     };
 
                     const headNext = page.locator('link[rel="next"]');
@@ -1739,14 +1759,16 @@ try {
                         const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
                         log.info(`Using API pagination via ${opname}`);
                     }
-                    let snapshot = await collectSnapshot({ includeInitialState, useDomDetails: enableDomDetails });
+                    const preferPageCandidates = preferPaginationControls;
+                    const useDomDetails = enableDomDetails || preferPaginationControls;
+                    let snapshot = await collectSnapshot({ includeInitialState, useDomDetails, preferPageCandidates });
                     let restaurants = snapshot.bestCandidate.restaurants || [];
                     let totalCount = snapshot.bestCandidate.totalCount || 0;
                     let detailIndex = snapshot.detailIndex;
                     lastPageUrl = currentUrl;
 
                     if (pageNumber > 1 && restaurants.length < Math.min(DEFAULT_PAGE_SIZE, 20)) {
-                        const fallbackSnapshot = await collectSnapshot({ includeInitialState: true, useDomDetails: true });
+                        const fallbackSnapshot = await collectSnapshot({ includeInitialState: true, useDomDetails: true, preferPageCandidates: true });
                         const fallbackRestaurants = fallbackSnapshot.bestCandidate.restaurants || [];
                         const originalFresh = countFreshRestaurants(restaurants);
                         const fallbackFresh = countFreshRestaurants(fallbackRestaurants);
@@ -1778,7 +1800,7 @@ try {
                             });
                             await page.waitForTimeout(1500);
 
-                            const updatedSnapshot = await collectSnapshot({ includeInitialState, useDomDetails: enableDomDetails });
+                            const updatedSnapshot = await collectSnapshot({ includeInitialState, useDomDetails, preferPageCandidates });
                             const updatedRestaurants = updatedSnapshot.bestCandidate.restaurants || [];
 
                             if (updatedRestaurants.length > previousCount) {
@@ -1818,7 +1840,7 @@ try {
 
                     const moved = await goToNextPage();
                     if (!moved) {
-                        if (!useApiPagination && request.userData.apiTemplate) {
+                        if (!preferPaginationControls && !useApiPagination && request.userData.apiTemplate) {
                             apiTemplate = request.userData.apiTemplate;
                             const pageSize = derivePageSize(apiTemplate.variables, restaurants.length || DEFAULT_PAGE_SIZE);
                             const ran = await runApiPagination(pageNumber + 1, pageSize, totalCount);
