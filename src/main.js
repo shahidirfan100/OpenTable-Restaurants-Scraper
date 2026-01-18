@@ -755,8 +755,8 @@ try {
                 };
 
                 const enableDomDetails = ENABLE_DOM_DETAILS || ENABLE_DOM_FALLBACK || useDomFallback;
-                const extractFromPage = async () => {
-                    return page.evaluate((useDomDetails) => {
+                const extractFromPage = async (pageNumber) => {
+                    return page.evaluate(({ useDomDetails, pageNumber }) => {
                         const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
                         const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
                         const normalizeNameKey = (name) => {
@@ -1309,14 +1309,16 @@ try {
                         };
 
                         const candidates = [];
-                        const initialState = window.__INITIAL_STATE__ || window.__PRELOADED_STATE__;
+                        // Ignore initial state on subsequent pages as it's likely stale (SPA pagination)
+                        const viewInitialState = pageNumber === 1;
+                        const initialState = viewInitialState ? (window.__INITIAL_STATE__ || window.__PRELOADED_STATE__) : null;
                         if (initialState) {
                             const known = extractFromKnownPaths(initialState, 'initial_state');
                             if (known) candidates.push(known);
                         }
 
-                        let nextData = window.__NEXT_DATA__ || null;
-                        if (!nextData) {
+                        let nextData = viewInitialState ? (window.__NEXT_DATA__ || null) : null;
+                        if (!nextData && viewInitialState) {
                             const nextDataEl = document.getElementById('__NEXT_DATA__');
                             if (nextDataEl?.textContent) {
                                 try {
@@ -1384,7 +1386,7 @@ try {
                             || /access denied|robot|captcha/i.test(document.title || '');
 
                         return { ...best, blocked, details, domDetails };
-                    }, enableDomDetails);
+                    }, { useDomDetails: enableDomDetails, pageNumber });
                 };
                 let jsonCandidateOffset = 0;
                 let warnedBlocked = false;
@@ -1393,7 +1395,7 @@ try {
                 const maxPages = Math.max(3, Math.ceil(RESULTS_WANTED / 50) + 5);
 
                 const collectSnapshot = async () => {
-                    const pageData = await extractFromPage();
+                    const pageData = await extractFromPage(pageNumber);
                     if (pageData.blocked && !warnedBlocked) {
                         warnedBlocked = true;
                         log.warning('Possible anti-bot interstitial detected on the page.');
