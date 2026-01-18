@@ -14,14 +14,27 @@ const USER_AGENTS = [
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
+const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
+const hasRestaurantUrl = (value) => {
+    const slug = value?.slug;
+    return Boolean(value?.profileLink || value?.canonicalUrl || value?.url || (typeof slug === 'string' && /[a-zA-Z]/.test(slug)));
+};
+const hasRestaurantMeta = (value) => Boolean(
+    value?.priceBand || value?.priceRange || value?.priceCategory
+    || value?.starRating || value?.rating || value?.reviewScore || value?.reviewRating
+    || value?.cuisine || value?.primaryCuisine || value?.cuisines,
+);
+const isLikelyRestaurant = (value) => Boolean(getCandidateName(value) && (hasRestaurantUrl(value) || hasRestaurantMeta(value)));
+
 const scoreRestaurantCandidate = (value) => {
-    if (!isPlainObject(value)) return 0;
+    if (!isPlainObject(value) || !isLikelyRestaurant(value)) return 0;
     let score = 0;
-    if (value.name || value.restaurantName || value.title) score += 3;
+    if (getCandidateName(value)) score += 3;
     if (value.rid || value.restaurantId || value.id || value.restaurant_id) score += 2;
     if (value.profileLink || value.canonicalUrl || value.url || value.slug) score += 2;
-    if (value.priceBand || value.priceRange || value.price) score += 1;
-    if (value.starRating || value.rating || value.reviewScore) score += 1;
+    if (value.priceBand || value.priceRange || value.price || value.priceCategory) score += 1;
+    if (value.starRating || value.rating || value.reviewScore || value.reviewRating) score += 1;
+    if (value.cuisine || value.primaryCuisine || value.cuisines) score += 1;
     return score;
 };
 
@@ -36,15 +49,15 @@ const findBestRestaurantArray = (root, maxDepth = 6) => {
         seen.add(node);
 
         if (Array.isArray(node)) {
-            let matches = 0;
-            let score = 0;
-            for (const item of node) {
-                const itemScore = scoreRestaurantCandidate(item);
-                if (itemScore >= 4) matches += 1;
-                score += itemScore;
-            }
-            if (matches > 0 && (matches > best.matches || (matches === best.matches && score > best.score))) {
-                best = { items: node, matches, score };
+            const matching = node.filter(isLikelyRestaurant);
+            if (matching.length > 0) {
+                let score = 0;
+                for (const item of matching) {
+                    score += scoreRestaurantCandidate(item);
+                }
+                if (matching.length > best.matches || (matching.length === best.matches && score > best.score)) {
+                    best = { items: matching, matches: matching.length, score };
+                }
             }
             for (const item of node) visit(item, depth + 1);
             return;
@@ -74,6 +87,8 @@ const extractRestaurantsFromData = (data) => {
 
     for (const arr of knownPaths) {
         if (Array.isArray(arr) && arr.length) {
+            const filtered = arr.filter(isLikelyRestaurant);
+            if (!filtered.length) continue;
             const totalCount = data?.data?.search?.totalRestaurantCount
                 || data?.data?.search?.totalResults
                 || data?.data?.search?.total
@@ -81,7 +96,7 @@ const extractRestaurantsFromData = (data) => {
                 || data?.search?.totalResults
                 || data?.totalResults
                 || 0;
-            return { restaurants: arr, totalCount };
+            return { restaurants: filtered, totalCount };
         }
     }
 
@@ -100,19 +115,27 @@ const normalizeRestaurant = (r) => {
     const cuisines = Array.isArray(r?.cuisines) ? r.cuisines : [];
     const primaryCuisine = cuisines[0]?.name || cuisines[0] || null;
     const bookingSlots = r?.availabilitySlots || r?.timeslots || r?.slots || r?.availability?.slots || [];
+    const profileLink = r?.profileLink;
+    const profileUrl = profileLink
+        ? (profileLink.startsWith('http') ? profileLink : `https://www.opentable.com${profileLink}`)
+        : null;
+    const rawUrl = r?.canonicalUrl || r?.url || null;
+    const normalizedUrl = rawUrl
+        ? (rawUrl.startsWith('http') ? rawUrl : `https://www.opentable.com${rawUrl}`)
+        : null;
+    const slug = typeof r?.slug === 'string' && /[a-zA-Z]/.test(r.slug) ? r.slug : null;
+    const slugUrl = slug ? `https://www.opentable.com/r/${slug}` : null;
 
     return {
-        name: r?.name || r?.restaurantName || r?.title || null,
-        cuisine: r?.cuisine?.name || r?.cuisine?.displayName || r?.primaryCuisine || r?.cuisineType || primaryCuisine,
+        name: getCandidateName(r),
+        cuisine: r?.cuisine?.name || r?.cuisine?.displayName || r?.primaryCuisine || r?.cuisineType || r?.cuisine || primaryCuisine,
         price_range: r?.priceBand || r?.priceRange || r?.price || r?.priceCategory || null,
         rating: r?.starRating || r?.rating || r?.reviewScore || r?.reviewRating || null,
         reviews_count: r?.reviewCount || r?.reviewsCount || r?.numberOfReviews || r?.review_count || null,
         neighborhood: r?.neighborhood || r?.location?.neighborhood || r?.address?.neighborhood || null,
         city: r?.city || r?.location?.city || r?.address?.city || null,
         booking_slots: Array.isArray(bookingSlots) ? bookingSlots : [],
-        url: r?.profileLink
-            ? `https://www.opentable.com${r.profileLink}`
-            : r?.canonicalUrl || r?.url || (r?.slug ? `https://www.opentable.com/r/${r.slug}` : null) || (id ? `https://www.opentable.com/r/${id}` : null),
+        url: profileUrl || normalizedUrl || slugUrl,
         image_url: r?.primaryPhoto?.uri || r?.photo?.uri || r?.image?.url || r?.imageUrl || null,
         restaurant_id: id,
     };
@@ -234,20 +257,35 @@ try {
                 const extractFromPage = async () => {
                     return page.evaluate(() => {
                         const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+                        const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
+                        const hasRestaurantUrl = (value) => {
+                            const slug = value?.slug;
+                            return Boolean(value?.profileLink || value?.canonicalUrl || value?.url || (typeof slug === 'string' && /[a-zA-Z]/.test(slug)));
+                        };
+                        const hasRestaurantMeta = (value) => Boolean(
+                            value?.priceBand || value?.priceRange || value?.priceCategory
+                            || value?.starRating || value?.rating || value?.reviewScore || value?.reviewRating
+                            || value?.cuisine || value?.primaryCuisine || value?.cuisines,
+                        );
+                        const isLikelyRestaurant = (value) => Boolean(getCandidateName(value) && (hasRestaurantUrl(value) || hasRestaurantMeta(value)));
                         const scoreCandidate = (value) => {
-                            if (!isPlainObject(value)) return 0;
+                            if (!isPlainObject(value) || !isLikelyRestaurant(value)) return 0;
                             let score = 0;
-                            if (value.name || value.restaurantName || value.title) score += 3;
+                            if (getCandidateName(value)) score += 3;
                             if (value.rid || value.restaurantId || value.id || value.restaurant_id) score += 2;
                             if (value.profileLink || value.canonicalUrl || value.url || value.slug) score += 2;
-                            if (value.priceBand || value.priceRange || value.price) score += 1;
-                            if (value.starRating || value.rating || value.reviewScore) score += 1;
+                            if (value.priceBand || value.priceRange || value.price || value.priceCategory) score += 1;
+                            if (value.starRating || value.rating || value.reviewScore || value.reviewRating) score += 1;
+                            if (value.cuisine || value.primaryCuisine || value.cuisines) score += 1;
                             return score;
                         };
 
                         const addCandidate = (candidates, restaurants, totalCount, source) => {
                             if (Array.isArray(restaurants) && restaurants.length) {
-                                candidates.push({ restaurants, totalCount: totalCount || restaurants.length, source });
+                                const filtered = restaurants.filter(isLikelyRestaurant);
+                                if (filtered.length) {
+                                    candidates.push({ restaurants: filtered, totalCount: totalCount || restaurants.length, source });
+                                }
                             }
                         };
 
@@ -280,15 +318,15 @@ try {
                                 seen.add(node);
 
                                 if (Array.isArray(node)) {
-                                    let matches = 0;
-                                    let score = 0;
-                                    for (const item of node) {
-                                        const itemScore = scoreCandidate(item);
-                                        if (itemScore >= 4) matches += 1;
-                                        score += itemScore;
-                                    }
-                                    if (matches > 0 && (matches > best.matches || (matches === best.matches && score > best.score))) {
-                                        best = { items: node, matches, score };
+                                    const matching = node.filter(isLikelyRestaurant);
+                                    if (matching.length > 0) {
+                                        let score = 0;
+                                        for (const item of matching) {
+                                            score += scoreCandidate(item);
+                                        }
+                                        if (matching.length > best.matches || (matching.length === best.matches && score > best.score)) {
+                                            best = { items: matching, matches: matching.length, score };
+                                        }
                                     }
                                     for (const item of node) visit(item, depth + 1);
                                     return;
@@ -344,7 +382,7 @@ try {
                             for (const [key, value] of Object.entries(apolloState)) {
                                 const typename = value?.__typename || '';
                                 if ((key && key.startsWith('Restaurant:')) || /restaurant/i.test(typename)) {
-                                    if (scoreCandidate(value) >= 4) apolloRestaurants.push(value);
+                                    if (isLikelyRestaurant(value)) apolloRestaurants.push(value);
                                 }
                             }
                             addCandidate(candidates, apolloRestaurants, apolloRestaurants.length, 'apollo_state');
