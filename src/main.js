@@ -44,6 +44,33 @@ const normalizeUrl = (value) => {
     }
 };
 
+const normalizeImageUrl = (url) => {
+    if (!url || typeof url !== 'string') return null;
+    let normalized = url.trim();
+    if (!normalized) return null;
+    // Add https: prefix for protocol-relative URLs
+    if (normalized.startsWith('//')) {
+        normalized = `https:${normalized}`;
+    } else if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
+        if (normalized.includes('resizer.otstatic.com') || normalized.includes('otstatic.com')) {
+            normalized = `https://${normalized}`;
+        } else {
+            return null;
+        }
+    }
+    // Upgrade v3 to v4 for better image quality
+    normalized = normalized.replace('/v3/', '/v4/');
+    // If URL has no extension and no query params, add .jpg
+    if (normalized.includes('resizer.otstatic.com') || normalized.includes('photos.otstatic.com')) {
+        const hasExtension = /\.(jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(normalized);
+        const hasQueryParams = normalized.includes('?');
+        if (!hasExtension && !hasQueryParams) {
+            normalized = `${normalized}.jpg`;
+        }
+    }
+    return normalized;
+};
+
 const extractSlugFromUrl = (value) => {
     if (!value || typeof value !== 'string') return null;
     const match = value.match(/\/r\/([^/?#]+)/i);
@@ -220,13 +247,13 @@ const updatePaginationVariables = (variables, page, pageSize) => {
         if (!node || typeof node !== 'object') return;
         for (const [key, value] of Object.entries(node)) {
             if (typeof value === 'number') {
-                if (/pageNumber|pageIndex|page/i.test(key)) {
+                if (/^(pageNumber|pageIndex|page)$/i.test(key)) {
                     node[key] = page;
                     updated = true;
-                } else if (/offset|start|from|startIndex/i.test(key)) {
+                } else if (/^(offset|start|from|startIndex|skip)$/i.test(key)) {
                     node[key] = Math.max(0, (page - 1) * pageSize);
                     updated = true;
-                } else if (/limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
+                } else if (/^(limit|pageSize|pagesize|perPage|per_page|size|first|take)$/i.test(key)) {
                     node[key] = pageSize;
                     updated = true;
                 }
@@ -246,13 +273,13 @@ const updatePaginationParams = (params, page, pageSize) => {
         if (!value) continue;
         const numeric = Number(value);
         if (!Number.isFinite(numeric)) continue;
-        if (/pageNumber|pageIndex|page/i.test(key)) {
+        if (/^(pageNumber|pageIndex|page)$/i.test(key)) {
             updatedParams[key] = String(page);
             updated = true;
-        } else if (/offset|start|from|startIndex/i.test(key)) {
+        } else if (/^(offset|start|from|startIndex|skip)$/i.test(key)) {
             updatedParams[key] = String(Math.max(0, (page - 1) * pageSize));
             updated = true;
-        } else if (/limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
+        } else if (/^(limit|pageSize|pagesize|perPage|per_page|size|first|take)$/i.test(key)) {
             updatedParams[key] = String(pageSize);
             updated = true;
         }
@@ -319,7 +346,8 @@ const scoreApiTemplate = (template, restaurantsCount, detailsCount = 0) => {
     const opname = String(template.operationName || template.queryParams?.opname || '');
     let score = (restaurantsCount || 0) * 2 + (detailsCount || 0);
     if (/search|availability|results/i.test(opname)) score += 60;
-    if (/home|module|recommend/i.test(opname)) score -= 10;
+    if (/RestaurantsAvailability|SearchAvailability/i.test(opname)) score += 40;
+    if (/home|module|recommend|list/i.test(opname)) score -= 30;
     if (template.method === 'POST') score += 5;
     const variablesString = JSON.stringify(template.variables || {});
     if (/term|search|query|metro|city|location/i.test(variablesString)) score += 10;
@@ -527,7 +555,7 @@ const normalizeRestaurant = (r, detail) => {
             || null,
         booking_slots: Array.isArray(bookingSlots) ? bookingSlots : [],
         url: getRestaurantUrl(base) || getRestaurantUrl(extra),
-        image_url: getRestaurantImage(base) || getRestaurantImage(extra),
+        image_url: normalizeImageUrl(getRestaurantImage(base) || getRestaurantImage(extra)),
         restaurant_id: getRestaurantId(base) || getRestaurantId(extra),
     };
 };
