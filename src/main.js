@@ -13,6 +13,8 @@ const USER_AGENTS = [
 ];
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+const ENABLE_DOM_DETAILS = false;
+const ENABLE_DOM_FALLBACK = false;
 
 const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
 const normalizeNameKey = (name) => {
@@ -115,6 +117,181 @@ const getRestaurantImage = (value) => value?.primaryPhoto?.uri
     || value?.images?.[0]?.url
     || null;
 
+const parseJsonSafe = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return null;
+    }
+};
+
+const isGraphqlUrl = (url) => /\/dapi\/fe\/gql|graphql/i.test(url);
+
+const extractGraphqlTemplate = (url, method, postData) => {
+    if (!url) return null;
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(url);
+    } catch {
+        return null;
+    }
+    const queryParams = Object.fromEntries(parsedUrl.searchParams.entries());
+    const urlVariables = parseJsonSafe(parsedUrl.searchParams.get('variables'));
+    const urlExtensions = parseJsonSafe(parsedUrl.searchParams.get('extensions'));
+    let body = null;
+    let variables = urlVariables || null;
+    let operationName = queryParams.opname || null;
+
+    if (postData) {
+        const parsedBody = parseJsonSafe(postData);
+        if (parsedBody && typeof parsedBody === 'object') {
+            body = parsedBody;
+            variables = parsedBody.variables || variables;
+            operationName = parsedBody.operationName || operationName;
+        }
+    }
+
+    return {
+        url: `${parsedUrl.origin}${parsedUrl.pathname}`,
+        method,
+        queryParams,
+        variables,
+        extensions: urlExtensions || body?.extensions || null,
+        operationName,
+        body,
+    };
+};
+
+const derivePageSize = (variables, fallback) => {
+    if (!variables || typeof variables !== 'object') return fallback;
+    let found = null;
+    const visit = (node) => {
+        if (!node || typeof node !== 'object') return;
+        for (const [key, value] of Object.entries(node)) {
+            if (typeof value === 'number' && /limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
+                found = value;
+                return;
+            }
+            if (typeof value === 'object') visit(value);
+            if (found !== null) return;
+        }
+    };
+    visit(variables);
+    return found || fallback;
+};
+
+const updatePaginationVariables = (variables, page, pageSize) => {
+    if (!variables || typeof variables !== 'object') return { variables, updated: false };
+    const cloned = JSON.parse(JSON.stringify(variables));
+    let updated = false;
+    const visit = (node) => {
+        if (!node || typeof node !== 'object') return;
+        for (const [key, value] of Object.entries(node)) {
+            if (typeof value === 'number') {
+                if (/pageNumber|pageIndex|page/i.test(key)) {
+                    node[key] = page;
+                    updated = true;
+                } else if (/offset|start|from|startIndex/i.test(key)) {
+                    node[key] = Math.max(0, (page - 1) * pageSize);
+                    updated = true;
+                } else if (/limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
+                    node[key] = pageSize;
+                    updated = true;
+                }
+            } else if (typeof value === 'object') {
+                visit(value);
+            }
+        }
+    };
+    visit(cloned);
+    return { variables: cloned, updated };
+};
+
+const updatePaginationParams = (params, page, pageSize) => {
+    const updatedParams = { ...params };
+    let updated = false;
+    for (const [key, value] of Object.entries(updatedParams)) {
+        if (!value) continue;
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) continue;
+        if (/pageNumber|pageIndex|page/i.test(key)) {
+            updatedParams[key] = String(page);
+            updated = true;
+        } else if (/offset|start|from|startIndex/i.test(key)) {
+            updatedParams[key] = String(Math.max(0, (page - 1) * pageSize));
+            updated = true;
+        } else if (/limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
+            updatedParams[key] = String(pageSize);
+            updated = true;
+        }
+    }
+    return { params: updatedParams, updated };
+};
+
+const buildApiRequest = (template, page, pageSize) => {
+    if (!template) return null;
+    const method = template.method || 'GET';
+    const pageSizeResolved = derivePageSize(template.variables, pageSize);
+    const { variables, updated: varsUpdated } = updatePaginationVariables(template.variables, page, pageSizeResolved);
+    const { params, updated: paramsUpdated } = updatePaginationParams(template.queryParams, page, pageSizeResolved);
+
+    if (method === 'GET') {
+        const url = new URL(template.url);
+        for (const [key, value] of Object.entries(params || {})) {
+            url.searchParams.set(key, value);
+        }
+        if (variables) url.searchParams.set('variables', JSON.stringify(variables));
+        if (template.extensions && !url.searchParams.get('extensions')) {
+            url.searchParams.set('extensions', JSON.stringify(template.extensions));
+        }
+        return { url: url.href, method: 'GET', body: null, pageSize: pageSizeResolved, updated: varsUpdated || paramsUpdated };
+    }
+
+    const body = template.body ? { ...template.body } : {};
+    body.variables = variables || body.variables;
+    if (template.operationName) body.operationName = template.operationName;
+    if (template.extensions) body.extensions = template.extensions;
+    const query = new URLSearchParams(params || {}).toString();
+    const url = query ? `${template.url}?${query}` : template.url;
+    return { url, method: 'POST', body: JSON.stringify(body), pageSize: pageSizeResolved, updated: varsUpdated || paramsUpdated };
+};
+
+const fetchApiPage = async (template, page, pageSize, userAgent) => {
+    const requestConfig = buildApiRequest(template, page, pageSize);
+    if (!requestConfig) return null;
+    if (page > 1 && !requestConfig.updated) {
+        return { error: 'No pagination parameters found', pageSize: requestConfig.pageSize };
+    }
+    const headers = {
+        accept: 'application/json',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': userAgent || getRandomUserAgent(),
+    };
+    if (requestConfig.method === 'POST') {
+        headers['content-type'] = 'application/json';
+    }
+    const response = await fetch(requestConfig.url, {
+        method: requestConfig.method,
+        headers,
+        body: requestConfig.body,
+    });
+    if (!response.ok) {
+        return { error: `API status ${response.status}`, pageSize: requestConfig.pageSize };
+    }
+    const json = await response.json();
+    return { json, pageSize: requestConfig.pageSize };
+};
+
+const scoreApiTemplate = (template, restaurantsCount) => {
+    if (!template) return 0;
+    const opname = String(template.operationName || template.queryParams?.opname || '');
+    let score = restaurantsCount || 0;
+    if (/search|availability|results/i.test(opname)) score += 50;
+    if (/home|module|recommend/i.test(opname)) score -= 10;
+    if (template.method === 'POST') score += 5;
+    return score;
+};
 const hasRestaurantMeta = (value) => Boolean(
     value?.priceBand || value?.priceRange || value?.priceCategory || value?.price_range
     || getRestaurantRating(value) || getRestaurantReviewsCount(value)
@@ -252,10 +429,20 @@ const extractRestaurantsFromData = (data) => {
     return { restaurants: findBestRestaurantArray(data), totalCount: 0, details: collectDetailItemsFromData(data) };
 };
 
+const scoreCandidateSource = (candidate) => {
+    if (!candidate) return 0;
+    const source = String(candidate.source || '');
+    let bonus = 0;
+    if (/gql|graphql|search|availability|results/i.test(source)) bonus += 5;
+    if (/dom_cards/i.test(source)) bonus -= 5;
+    return bonus;
+};
+
 const pickBestCandidate = (candidates) => {
     const usable = candidates.filter((candidate) => candidate?.restaurants?.length);
     if (!usable.length) return { restaurants: [], totalCount: 0, source: null };
-    usable.sort((a, b) => scoreRestaurantList(b.restaurants) - scoreRestaurantList(a.restaurants)
+    usable.sort((a, b) => (scoreRestaurantList(b.restaurants) + scoreCandidateSource(b))
+        - (scoreRestaurantList(a.restaurants) + scoreCandidateSource(a))
         || b.restaurants.length - a.restaurants.length
         || (b.totalCount || 0) - (a.totalCount || 0));
     return usable[0];
@@ -398,6 +585,7 @@ try {
         location,
         results_wanted: RESULTS_WANTED_RAW = 20,
         proxyConfiguration,
+        useDomFallback = false,
     } = input;
 
     const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
@@ -453,6 +641,9 @@ try {
             async ({ page, request }) => {
                 request.userData.jsonCandidates = [];
                 request.userData.jsonDetailItems = [];
+                request.userData.apiTemplate = request.userData.apiTemplate || null;
+                request.userData.apiTemplateScore = request.userData.apiTemplateScore || 0;
+                request.userData.userAgent = request.userData.userAgent || getRandomUserAgent();
                 const responseListener = async (response) => {
                     const contentType = response.headers()['content-type'] || '';
                     if (!contentType.includes('application/json')) return;
@@ -468,6 +659,15 @@ try {
                             request.userData.jsonDetailItems.push(...extracted.details);
                             if (request.userData.jsonDetailItems.length > 1500) {
                                 request.userData.jsonDetailItems = request.userData.jsonDetailItems.slice(-1500);
+                            }
+                        }
+                        if (extracted.restaurants.length && isGraphqlUrl(url)) {
+                            const req = response.request();
+                            const template = extractGraphqlTemplate(url, req.method(), req.postData());
+                            const templateScore = scoreApiTemplate(template, extracted.restaurants.length);
+                            if (template && templateScore > request.userData.apiTemplateScore) {
+                                request.userData.apiTemplate = template;
+                                request.userData.apiTemplateScore = templateScore;
                             }
                         }
                     } catch {
@@ -511,8 +711,9 @@ try {
                     await page.waitForTimeout(2000);
                 };
 
+                const enableDomDetails = ENABLE_DOM_DETAILS || ENABLE_DOM_FALLBACK || useDomFallback;
                 const extractFromPage = async () => {
-                    return page.evaluate(() => {
+                    return page.evaluate((useDomDetails) => {
                         const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
                         const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
                         const normalizeNameKey = (name) => {
@@ -1067,11 +1268,15 @@ try {
                         for (const target of scanTargets) {
                             details.push(...collectDetailItems(target));
                         }
-                        const domDetails = extractRestaurantCardsFromDom();
-                        addCandidate(candidates, domDetails, domDetails.length, 'dom_cards');
-                        for (const target of scanTargets) {
-                            const scanned = findBestRestaurantArray(target);
-                            addCandidate(candidates, scanned, scanned.length, 'scan');
+                        const domDetails = useDomDetails ? extractRestaurantCardsFromDom() : [];
+                        if (useDomDetails) {
+                            addCandidate(candidates, domDetails, domDetails.length, 'dom_cards');
+                        }
+                        if (candidates.length === 0) {
+                            for (const target of scanTargets) {
+                                const scanned = findBestRestaurantArray(target);
+                                addCandidate(candidates, scanned, scanned.length, 'scan');
+                            }
                         }
 
                         candidates.sort((a, b) => scoreRestaurantList(b.restaurants) - scoreRestaurantList(a.restaurants)
@@ -1083,7 +1288,7 @@ try {
                             || /access denied|robot|captcha/i.test(document.title || '');
 
                         return { ...best, blocked, details, domDetails };
-                    });
+                    }, enableDomDetails);
                 };
                 let jsonCandidateOffset = 0;
                 let warnedBlocked = false;
@@ -1112,6 +1317,7 @@ try {
                     for (const candidate of newCandidates) {
                         if (Array.isArray(candidate.details)) detailItems.push(...candidate.details);
                     }
+                    if (Array.isArray(bestCandidate.restaurants)) detailItems.push(...bestCandidate.restaurants);
                     const detailIndex = buildRestaurantIndex(detailItems);
 
                     return { bestCandidate, detailIndex };
@@ -1183,6 +1389,38 @@ try {
                     return false;
                 };
 
+                const pushRestaurants = async (restaurants, detailIndex) => {
+                    const savedBefore = saved;
+                    for (const r of restaurants) {
+                        const id = getRestaurantId(r);
+                        const url = getRestaurantUrl(r);
+                        const nameKey = normalizeNameKey(getCandidateName(r)) || null;
+                        if (id !== null && id !== undefined && seenIds.has(String(id))) continue;
+                        if (!id && url && seenUrls.has(url)) continue;
+                        if (!id && !url && nameKey && seenNames.has(nameKey)) continue;
+
+                        const item = normalizeRestaurant(r, findRestaurantDetail(r, detailIndex));
+                        await Dataset.pushData(item);
+                        saved++;
+
+                        if (id !== null && id !== undefined) seenIds.add(String(id));
+                        if (item.url) seenUrls.add(item.url);
+                        const normalizedItemName = normalizeNameKey(item.name);
+                        if (normalizedItemName) seenNames.add(normalizedItemName);
+
+                        if (saved >= RESULTS_WANTED) break;
+                    }
+                    return saved - savedBefore;
+                };
+
+                const apiTemplate = request.userData.apiTemplate;
+                const useApiPagination = Boolean(apiTemplate);
+                const allowScroll = !useApiPagination;
+                if (useApiPagination) {
+                    const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
+                    log.info(`Using API pagination via ${opname}`);
+                }
+
                 while (saved < RESULTS_WANTED && pageNumber <= maxPages) {
                     await waitForResultsReady();
                     let snapshot = await collectSnapshot();
@@ -1196,7 +1434,7 @@ try {
                         log.warning(`No restaurants found on page ${pageNumber}.`);
                     }
 
-                    const shouldScroll = restaurants.length < RESULTS_WANTED && (totalCount === 0 || restaurants.length < totalCount);
+                    const shouldScroll = allowScroll && restaurants.length < RESULTS_WANTED && (totalCount === 0 || restaurants.length < totalCount);
                     if (shouldScroll) {
                         log.info('Scrolling to load more restaurants...');
 
@@ -1225,25 +1463,8 @@ try {
                         }
                     }
 
-                    const savedBefore = saved;
-                    for (const r of restaurants) {
-                        const id = getRestaurantId(r);
-                        const url = getRestaurantUrl(r);
-                        const nameKey = getCandidateName(r)?.toLowerCase() || null;
-                        if (id !== null && id !== undefined && seenIds.has(String(id))) continue;
-                        if (!id && url && seenUrls.has(url)) continue;
-                        if (!id && !url && nameKey && seenNames.has(nameKey)) continue;
-
-                        const item = normalizeRestaurant(r, findRestaurantDetail(r, detailIndex));
-                        await Dataset.pushData(item);
-                        saved++;
-
-                        if (id !== null && id !== undefined) seenIds.add(String(id));
-                        if (item.url) seenUrls.add(item.url);
-                        if (item.name) seenNames.add(item.name.toLowerCase());
-
-                        if (saved >= RESULTS_WANTED) break;
-                    }
+                    const added = await pushRestaurants(restaurants, detailIndex);
+                    const savedBefore = saved - added;
 
                     if (saved === savedBefore) {
                         noProgressPages += 1;
@@ -1256,6 +1477,42 @@ try {
                     if (totalCount > restaurants.length && saved >= totalCount) break;
                     if (noProgressPages >= 2) {
                         log.warning('Pagination stalled with no new restaurants. Stopping.');
+                        break;
+                    }
+
+                    if (useApiPagination && pageNumber === 1) {
+                        let apiPage = 2;
+                        let pageSize = derivePageSize(apiTemplate.variables, restaurants.length || 50);
+                        let apiTotal = totalCount;
+                        while (saved < RESULTS_WANTED && apiPage <= maxPages) {
+                            const apiResult = await fetchApiPage(apiTemplate, apiPage, pageSize, request.userData.userAgent);
+                            if (!apiResult || apiResult.error) {
+                                log.warning(`API pagination failed on page ${apiPage}: ${apiResult?.error || 'unknown error'}`);
+                                break;
+                            }
+                            const extracted = extractRestaurantsFromData(apiResult.json);
+                            const apiRestaurants = extracted.restaurants || [];
+                            if (!apiRestaurants.length) {
+                                log.info(`No restaurants found in API page ${apiPage}. Stopping API pagination.`);
+                                break;
+                            }
+
+                            const apiDetails = [];
+                            if (Array.isArray(extracted.details)) apiDetails.push(...extracted.details);
+                            apiDetails.push(...apiRestaurants);
+                            const apiDetailIndex = buildRestaurantIndex(apiDetails);
+
+                            const addedApi = await pushRestaurants(apiRestaurants, apiDetailIndex);
+                            log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants (API page ${apiPage})`);
+
+                            apiTotal = extracted.totalCount || apiTotal;
+                            pageSize = apiResult.pageSize || pageSize;
+
+                            if (addedApi === 0) break;
+                            if (apiTotal && saved >= apiTotal) break;
+                            if (apiRestaurants.length < pageSize) break;
+                            apiPage += 1;
+                        }
                         break;
                     }
 
