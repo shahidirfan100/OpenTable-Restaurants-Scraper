@@ -13,8 +13,41 @@ const USER_AGENTS = [
 ];
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
-const ENABLE_DOM_DETAILS = false;
-const ENABLE_DOM_FALLBACK = false;
+const JSON_API_RE = /gql|graphql|search|results|availability|restaurants/i;
+const GRAPHQL_URL_RE = /\/dapi\/fe\/gql|graphql/i;
+const IMAGE_EXTENSION_RE = /\.(jpe?g|png|webp|gif)$/i;
+const BLOCKED_RESOURCE_TYPES = new Set(['image', 'font', 'media']);
+const RESOURCE_BLOCKLIST = [
+    'google-analytics',
+    'googletagmanager',
+    'facebook',
+    'doubleclick',
+    'adsense',
+    'hotjar',
+];
+const PAGINATION_LINK_SELECTORS = [
+    'a[rel="next"]',
+    'a[aria-label*="Next"]',
+    'a[aria-label*="next"]',
+    'a[data-test*="pagination-next"]',
+    'a[data-testid*="pagination-next"]',
+    'a[aria-label*="More"]',
+];
+const PAGINATION_BUTTON_SELECTORS = [
+    'button[aria-label*="Next"]',
+    'button[aria-label*="next"]',
+    'button[data-test*="pagination-next"]',
+    'button[data-testid*="pagination-next"]',
+    'button[aria-label*="More"]',
+];
+const PAGINATION_CONTAINER_SELECTORS = [
+    'nav[aria-label*="Pagination"]',
+    '[data-test*="pagination"]',
+    '[data-testid*="pagination"]',
+];
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_DETAIL_ITEMS = 1500;
+const MAX_SCROLLS = 20;
 
 const getCandidateName = (value) => value?.name || value?.restaurantName || value?.title || value?.displayName || value?.listingName || null;
 const normalizeNameKey = (name) => {
@@ -41,6 +74,31 @@ const normalizeUrl = (value) => {
         return parsed.href;
     } catch {
         return normalized.split('#')[0];
+    }
+};
+
+const normalizeImageUrl = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('data:')) return trimmed;
+    let normalized = null;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) normalized = trimmed;
+    else if (trimmed.startsWith('//')) normalized = `https:${trimmed}`;
+    else if (/otstatic\.com\//i.test(trimmed)) normalized = `https://${trimmed}`;
+    else if (trimmed.startsWith('/')) normalized = `https://www.opentable.com${trimmed}`;
+    else if (trimmed.includes('opentable.com/')) normalized = `https://${trimmed.replace(/^https?:\/\//, '')}`;
+    else normalized = trimmed;
+    try {
+        const parsed = new URL(normalized);
+        const lastSegment = parsed.pathname.split('/').pop() || '';
+        if (!lastSegment) return parsed.href;
+        if (!IMAGE_EXTENSION_RE.test(lastSegment)) {
+            parsed.pathname = `${parsed.pathname}.jpg`;
+        }
+        return parsed.href;
+    } catch {
+        return normalized;
     }
 };
 
@@ -157,8 +215,9 @@ const parseJsonSafe = (value) => {
     }
 };
 
-const isGraphqlUrl = (url) => /\/dapi\/fe\/gql|graphql/i.test(url);
+const isGraphqlUrl = (url) => GRAPHQL_URL_RE.test(url);
 
+// Capture a reusable GraphQL template so we can paginate via the API when needed.
 const extractGraphqlTemplate = (url, method, postData) => {
     if (!url) return null;
     let parsedUrl;
@@ -527,7 +586,7 @@ const normalizeRestaurant = (r, detail) => {
             || null,
         booking_slots: Array.isArray(bookingSlots) ? bookingSlots : [],
         url: getRestaurantUrl(base) || getRestaurantUrl(extra),
-        image_url: getRestaurantImage(base) || getRestaurantImage(extra),
+        image_url: normalizeImageUrl(getRestaurantImage(base)) || normalizeImageUrl(getRestaurantImage(extra)),
         restaurant_id: getRestaurantId(base) || getRestaurantId(extra),
     };
 };
@@ -684,15 +743,16 @@ try {
             async ({ page, request }) => {
                 request.userData.jsonCandidates = [];
                 request.userData.jsonDetailItems = [];
-                request.userData.apiTemplate = request.userData.apiTemplate || null;
-                request.userData.apiTemplateScore = request.userData.apiTemplateScore || 0;
-                request.userData.userAgent = request.userData.userAgent || getRandomUserAgent();
+                request.userData.apiTemplate ??= null;
+                request.userData.apiTemplateScore ??= 0;
+                request.userData.userAgent ??= getRandomUserAgent();
+                // Capture API responses to enrich results and enable API pagination.
                 const responseListener = async (response) => {
                     const contentType = response.headers()['content-type'] || '';
                     if (!contentType.includes('application/json')) return;
                     const url = response.url();
                     try {
-                        if (!/gql|graphql|search|results|availability|restaurants/i.test(url)) return;
+                        if (!JSON_API_RE.test(url)) return;
                         const data = await response.json();
                         const extracted = extractRestaurantsFromData(data);
                         if (extracted.restaurants.length) {
@@ -700,8 +760,8 @@ try {
                         }
                         if (extracted.details?.length) {
                             request.userData.jsonDetailItems.push(...extracted.details);
-                            if (request.userData.jsonDetailItems.length > 1500) {
-                                request.userData.jsonDetailItems = request.userData.jsonDetailItems.slice(-1500);
+                            if (request.userData.jsonDetailItems.length > MAX_DETAIL_ITEMS) {
+                                request.userData.jsonDetailItems = request.userData.jsonDetailItems.slice(-MAX_DETAIL_ITEMS);
                             }
                         }
                         if (isGraphqlUrl(url)) {
@@ -724,14 +784,8 @@ try {
                     const type = route.request().resourceType();
                     const url = route.request().url();
 
-                    // Block images, fonts, media, and common trackers
-                    if (['image', 'font', 'media'].includes(type) ||
-                        url.includes('google-analytics') ||
-                        url.includes('googletagmanager') ||
-                        url.includes('facebook') ||
-                        url.includes('doubleclick') ||
-                        url.includes('adsense') ||
-                        url.includes('hotjar')) {
+                    // Block heavy assets and common trackers.
+                    if (BLOCKED_RESOURCE_TYPES.has(type) || RESOURCE_BLOCKLIST.some((token) => url.includes(token))) {
                         return route.abort();
                     }
                     return route.continue();
@@ -754,7 +808,7 @@ try {
                     await page.waitForTimeout(2000);
                 };
 
-                const enableDomDetails = ENABLE_DOM_DETAILS || ENABLE_DOM_FALLBACK || useDomFallback;
+                const enableDomDetails = Boolean(useDomFallback);
                 const extractFromPage = async (pageNumber) => {
                     return page.evaluate(({ useDomDetails, pageNumber }) => {
                         const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
@@ -1392,8 +1446,9 @@ try {
                 let warnedBlocked = false;
                 let noProgressPages = 0;
                 let pageNumber = 1;
-                const maxPages = Math.max(3, Math.ceil(RESULTS_WANTED / 50) + 5);
+                const maxPages = Math.max(3, Math.ceil(RESULTS_WANTED / DEFAULT_PAGE_SIZE) + 5);
 
+                // Merge page state with captured API responses to find the best listing slice.
                 const collectSnapshot = async () => {
                     const pageData = await extractFromPage(pageNumber);
                     if (pageData.blocked && !warnedBlocked) {
@@ -1421,6 +1476,17 @@ try {
                     return { bestCandidate, detailIndex };
                 };
 
+                const hasPaginationControls = async () => {
+                    const headNext = page.locator('link[rel="next"]');
+                    if (await headNext.count()) return true;
+                    for (const selector of [...PAGINATION_LINK_SELECTORS, ...PAGINATION_BUTTON_SELECTORS, ...PAGINATION_CONTAINER_SELECTORS]) {
+                        const locator = page.locator(selector);
+                        if (await locator.count()) return true;
+                    }
+                    return false;
+                };
+
+                // Follow rel=next or pagination controls when available.
                 const goToNextPage = async () => {
                     const currentUrl = page.url();
                     const gotoUrl = async (href) => {
@@ -1456,15 +1522,7 @@ try {
                         if (await gotoUrl(href)) return true;
                     }
 
-                    const linkSelectors = [
-                        'a[rel="next"]',
-                        'a[aria-label*="Next"]',
-                        'a[aria-label*="next"]',
-                        'a[data-test*="pagination-next"]',
-                        'a[data-testid*="pagination-next"]',
-                        'a[aria-label*="More"]',
-                    ];
-                    for (const selector of linkSelectors) {
+                    for (const selector of PAGINATION_LINK_SELECTORS) {
                         const locator = page.locator(selector);
                         if (!await locator.count()) continue;
                         const href = await locator.first().getAttribute('href');
@@ -1472,14 +1530,7 @@ try {
                         if (await clickLocator(locator)) return true;
                     }
 
-                    const buttonSelectors = [
-                        'button[aria-label*="Next"]',
-                        'button[aria-label*="next"]',
-                        'button[data-test*="pagination-next"]',
-                        'button[data-testid*="pagination-next"]',
-                        'button[aria-label*="More"]',
-                    ];
-                    for (const selector of buttonSelectors) {
+                    for (const selector of PAGINATION_BUTTON_SELECTORS) {
                         const locator = page.locator(selector);
                         if (await clickLocator(locator)) return true;
                     }
@@ -1487,6 +1538,7 @@ try {
                     return false;
                 };
 
+                // Deduplicate and persist results while preserving stable IDs/URLs.
                 const pushRestaurants = async (restaurants, detailIndex) => {
                     const savedBefore = saved;
                     for (const r of restaurants) {
@@ -1514,16 +1566,29 @@ try {
                 let useApiPagination = false;
                 let apiTemplate = null;
                 let allowScroll = true;
+                let preferPaginationControls = false;
+                let loggedPaginationPreference = false;
 
                 while (saved < RESULTS_WANTED && pageNumber <= maxPages) {
-                    if (request.userData.apiTemplate && !useApiPagination) {
+                    await waitForResultsReady();
+                    if (!preferPaginationControls) {
+                        preferPaginationControls = await hasPaginationControls();
+                        if (preferPaginationControls && !loggedPaginationPreference) {
+                            loggedPaginationPreference = true;
+                            log.info('Pagination controls detected. Using next button pagination.');
+                        }
+                    }
+
+                    if (preferPaginationControls) {
+                        allowScroll = false;
+                        useApiPagination = false;
+                    } else if (request.userData.apiTemplate && !useApiPagination) {
                         apiTemplate = request.userData.apiTemplate;
                         useApiPagination = true;
                         allowScroll = false;
                         const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
                         log.info(`Using API pagination via ${opname}`);
                     }
-                    await waitForResultsReady();
                     let snapshot = await collectSnapshot();
                     let restaurants = snapshot.bestCandidate.restaurants || [];
                     let totalCount = snapshot.bestCandidate.totalCount || 0;
@@ -1541,7 +1606,7 @@ try {
 
                         let previousCount = restaurants.length;
                         let scrollAttempts = 0;
-                        const maxScrolls = 20;
+                        const maxScrolls = MAX_SCROLLS;
 
                         while (scrollAttempts < maxScrolls && saved + restaurants.length < RESULTS_WANTED) {
                             await page.evaluate(() => {
@@ -1583,7 +1648,7 @@ try {
 
                     if (useApiPagination && pageNumber === 1 && apiTemplate) {
                         let apiPage = 2;
-                        let pageSize = derivePageSize(apiTemplate.variables, restaurants.length || 50);
+                        let pageSize = derivePageSize(apiTemplate.variables, restaurants.length || DEFAULT_PAGE_SIZE);
                         let apiTotal = totalCount;
                         while (saved < RESULTS_WANTED && apiPage <= maxPages) {
                             const apiResult = await fetchApiPage(apiTemplate, apiPage, pageSize, request.userData.userAgent);
