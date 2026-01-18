@@ -60,11 +60,12 @@ const normalizeImageUrl = (url) => {
     }
     // Upgrade v3 to v4 for better image quality
     normalized = normalized.replace('/v3/', '/v4/');
-    // Add query params for OpenTable resizer (do NOT add .jpg extension - it breaks the URL)
+    // Add .jpg extension if no extension and no query params
     if (normalized.includes('resizer.otstatic.com') || normalized.includes('photos.otstatic.com')) {
+        const hasExtension = /\.(jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(normalized);
         const hasQueryParams = normalized.includes('?');
-        if (!hasQueryParams) {
-            normalized = `${normalized}?width=400&height=400`;
+        if (!hasExtension && !hasQueryParams) {
+            normalized = `${normalized}.jpg`;
         }
     }
     return normalized;
@@ -317,9 +318,10 @@ const buildApiRequest = (template, page, pageSize) => {
 const fetchApiPage = async (template, page, pageSize, userAgent) => {
     const requestConfig = buildApiRequest(template, page, pageSize);
     if (!requestConfig) return null;
-    if (page > 1 && !requestConfig.updated) {
-        return { error: 'No pagination parameters found', pageSize: requestConfig.pageSize };
-    }
+    // Skip pagination check - let API return same data and rely on DOM pagination fallback
+    // if (page > 1 && !requestConfig.updated) {
+    //     return { error: 'No pagination parameters found', pageSize: requestConfig.pageSize };
+    // }
     const headers = {
         accept: 'application/json',
         'accept-language': 'en-US,en;q=0.9',
@@ -1449,6 +1451,10 @@ try {
                 };
 
                 const goToNextPage = async () => {
+                    // Scroll to bottom first to make pagination visible
+                    await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
+                    await page.waitForTimeout(1000);
+
                     const currentUrl = page.url();
                     const gotoUrl = async (href) => {
                         if (!href) return false;
@@ -1613,10 +1619,13 @@ try {
                         let apiPage = 2;
                         let pageSize = derivePageSize(apiTemplate.variables, restaurants.length || 50);
                         let apiTotal = totalCount;
+                        let apiSuccess = false;
                         while (saved < RESULTS_WANTED && apiPage <= maxPages) {
                             const apiResult = await fetchApiPage(apiTemplate, apiPage, pageSize, request.userData.userAgent);
                             if (!apiResult || apiResult.error) {
-                                log.warning(`API pagination failed on page ${apiPage}: ${apiResult?.error || 'unknown error'}`);
+                                log.warning(`API pagination failed on page ${apiPage}: ${apiResult?.error || 'unknown error'}. Falling back to DOM pagination.`);
+                                useApiPagination = false;
+                                allowScroll = false;
                                 break;
                             }
                             const extracted = extractRestaurantsFromData(apiResult.json);
@@ -1641,8 +1650,9 @@ try {
                             if (apiTotal && saved >= apiTotal) break;
                             if (apiRestaurants.length < pageSize) break;
                             apiPage += 1;
+                            apiSuccess = true;
                         }
-                        break;
+                        if (apiSuccess) break;
                     }
 
                     const moved = await goToNextPage();
