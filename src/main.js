@@ -50,7 +50,17 @@ const extractSlugFromUrl = (value) => {
     return match?.[1] || null;
 };
 
-const getRestaurantId = (value) => value?.rid || value?.restaurantId || value?.restaurant_id || value?.id || value?.restaurantID || null;
+const getRestaurantId = (value) => value?.rid
+    || value?.restaurantId
+    || value?.restaurant_id
+    || value?.id
+    || value?.restaurantID
+    || value?.legacyId
+    || value?.legacyRestaurantId
+    || value?.restaurantLegacyId
+    || value?.legacy_rid
+    || value?.restaurantRid
+    || null;
 const getRestaurantSlug = (value) => {
     const slug = value?.slug || value?.urlSlug || value?.seo?.slug || value?.seo?.urlSlug;
     if (typeof slug === 'string' && slug.trim()) return slug.trim();
@@ -60,6 +70,8 @@ const getRestaurantSlug = (value) => {
 
 const getRestaurantUrl = (value) => {
     const rawUrl = value?.profileLink
+        || value?.profileUrl
+        || value?.profileURL
         || value?.links?.profile?.href
         || value?.links?.restaurant?.href
         || value?.urls?.profile
@@ -68,8 +80,12 @@ const getRestaurantUrl = (value) => {
         || value?.restaurant_url
         || value?.canonicalUrl
         || value?.canonicalURL
+        || value?.canonicalPath
         || value?.seo?.canonicalUrl
         || value?.seo?.canonicalURL
+        || value?.seo?.canonicalPath
+        || value?.seo?.url
+        || value?.seo?.path
         || value?.url
         || value?.href
         || value?.permalink
@@ -91,6 +107,9 @@ const getRestaurantRating = (value) => value?.starRating
     || value?.reviews?.rating
     || value?.reviews?.score
     || value?.reviews?.averageRating
+    || value?.reviewSummary?.rating
+    || value?.reviewSummary?.averageRating
+    || value?.ratingSummary?.rating
     || null;
 
 const getRestaurantReviewsCount = (value) => value?.reviewCount
@@ -101,12 +120,20 @@ const getRestaurantReviewsCount = (value) => value?.reviewCount
     || value?.reviews?.count
     || value?.reviews?.total
     || value?.reviews?.reviewCount
+    || value?.reviewSummary?.count
+    || value?.reviewSummary?.reviewCount
+    || value?.ratingSummary?.count
     || null;
 
 const getRestaurantImage = (value) => value?.primaryPhoto?.uri
     || value?.primaryPhoto?.url
     || value?.photo?.uri
     || value?.photo?.url
+    || value?.primaryPhotoUrl
+    || value?.heroImageUrl
+    || value?.thumbnailUrl
+    || value?.cardPhoto?.url
+    || value?.cardPhoto?.uri
     || value?.image?.url
     || value?.image?.src
     || (typeof value?.photo === 'string' ? value.photo : null)
@@ -283,13 +310,16 @@ const fetchApiPage = async (template, page, pageSize, userAgent) => {
     return { json, pageSize: requestConfig.pageSize };
 };
 
-const scoreApiTemplate = (template, restaurantsCount) => {
+const scoreApiTemplate = (template, restaurantsCount, detailsCount = 0) => {
     if (!template) return 0;
     const opname = String(template.operationName || template.queryParams?.opname || '');
-    let score = restaurantsCount || 0;
-    if (/search|availability|results/i.test(opname)) score += 50;
+    let score = (restaurantsCount || 0) * 2 + (detailsCount || 0);
+    if (/search|availability|results/i.test(opname)) score += 60;
     if (/home|module|recommend/i.test(opname)) score -= 10;
     if (template.method === 'POST') score += 5;
+    const variablesString = JSON.stringify(template.variables || {});
+    if (/term|search|query|metro|city|location/i.test(variablesString)) score += 10;
+    if (/date|datetime|covers|party/i.test(variablesString)) score += 5;
     return score;
 };
 const hasRestaurantMeta = (value) => Boolean(
@@ -405,9 +435,17 @@ const extractRestaurantsFromData = (data) => {
         data?.data?.search?.restaurants,
         data?.data?.search?.results,
         data?.data?.search?.searchResults?.restaurants,
+        data?.data?.search?.searchResults?.results,
+        data?.data?.searchResults?.restaurants,
+        data?.data?.searchResults?.results,
+        data?.data?.search?.searchResults?.listings,
         data?.data?.availability?.restaurants,
         data?.search?.restaurants,
         data?.search?.results,
+        data?.search?.searchResults?.restaurants,
+        data?.search?.searchResults?.results,
+        data?.searchResults?.restaurants,
+        data?.searchResults?.results,
         data?.restaurants,
     ];
 
@@ -648,8 +686,8 @@ try {
                     const contentType = response.headers()['content-type'] || '';
                     if (!contentType.includes('application/json')) return;
                     const url = response.url();
-                    if (!/gql|graphql|search|results|availability|restaurants/i.test(url)) return;
                     try {
+                        if (!/gql|graphql|search|results|availability|restaurants/i.test(url)) return;
                         const data = await response.json();
                         const extracted = extractRestaurantsFromData(data);
                         if (extracted.restaurants.length) {
@@ -661,10 +699,10 @@ try {
                                 request.userData.jsonDetailItems = request.userData.jsonDetailItems.slice(-1500);
                             }
                         }
-                        if (extracted.restaurants.length && isGraphqlUrl(url)) {
+                        if (isGraphqlUrl(url)) {
                             const req = response.request();
                             const template = extractGraphqlTemplate(url, req.method(), req.postData());
-                            const templateScore = scoreApiTemplate(template, extracted.restaurants.length);
+                            const templateScore = scoreApiTemplate(template, extracted.restaurants.length, extracted.details?.length || 0);
                             if (template && templateScore > request.userData.apiTemplateScore) {
                                 request.userData.apiTemplate = template;
                                 request.userData.apiTemplateScore = templateScore;
@@ -774,36 +812,47 @@ try {
                             if (slugFromUrl) return `https://www.opentable.com/r/${slugFromUrl}`;
                             return null;
                         };
-                        const getRestaurantRating = (value) => value?.starRating
-                            || value?.rating
-                            || value?.reviewScore
-                            || value?.reviewRating
-                            || value?.reviews?.rating
-                            || value?.reviews?.score
-                            || value?.reviews?.averageRating
-                            || null;
-                        const getRestaurantReviewsCount = (value) => value?.reviewCount
-                            || value?.reviewsCount
-                            || value?.numberOfReviews
-                            || value?.review_count
-                            || value?.reviews_count
-                            || value?.reviews?.count
-                            || value?.reviews?.total
-                            || value?.reviews?.reviewCount
-                            || null;
-                        const getRestaurantImage = (value) => value?.primaryPhoto?.uri
-                            || value?.primaryPhoto?.url
-                            || value?.photo?.uri
-                            || value?.photo?.url
-                            || value?.image?.url
-                            || value?.image?.src
-                            || (typeof value?.photo === 'string' ? value.photo : null)
-                            || (typeof value?.image === 'string' ? value.image : null)
-                            || value?.imageUrl
-                            || value?.image_url
-                            || value?.photos?.[0]?.url
-                            || value?.images?.[0]?.url
-                            || null;
+const getRestaurantRating = (value) => value?.starRating
+    || value?.rating
+    || value?.reviewScore
+    || value?.reviewRating
+    || value?.reviews?.rating
+    || value?.reviews?.score
+    || value?.reviews?.averageRating
+    || value?.reviewSummary?.rating
+    || value?.reviewSummary?.averageRating
+    || value?.ratingSummary?.rating
+    || null;
+const getRestaurantReviewsCount = (value) => value?.reviewCount
+    || value?.reviewsCount
+    || value?.numberOfReviews
+    || value?.review_count
+    || value?.reviews_count
+    || value?.reviews?.count
+    || value?.reviews?.total
+    || value?.reviews?.reviewCount
+    || value?.reviewSummary?.count
+    || value?.reviewSummary?.reviewCount
+    || value?.ratingSummary?.count
+    || null;
+const getRestaurantImage = (value) => value?.primaryPhoto?.uri
+    || value?.primaryPhoto?.url
+    || value?.photo?.uri
+    || value?.photo?.url
+    || value?.primaryPhotoUrl
+    || value?.heroImageUrl
+    || value?.thumbnailUrl
+    || value?.cardPhoto?.url
+    || value?.cardPhoto?.uri
+    || value?.image?.url
+    || value?.image?.src
+    || (typeof value?.photo === 'string' ? value.photo : null)
+    || (typeof value?.image === 'string' ? value.image : null)
+    || value?.imageUrl
+    || value?.image_url
+    || value?.photos?.[0]?.url
+    || value?.images?.[0]?.url
+    || null;
                         const hasRestaurantMeta = (value) => Boolean(
                             value?.priceBand || value?.priceRange || value?.priceCategory || value?.price_range
                             || getRestaurantRating(value) || getRestaurantReviewsCount(value)
@@ -1174,13 +1223,51 @@ try {
                                 const searchResults = state.search.searchResults;
                                 addCandidate(candidates, searchResults.restaurants, searchResults.totalRestaurantCount || searchResults.totalResults, `${prefix}.search.searchResults`);
                             }
+                            if (state?.search?.searchResults?.results) {
+                                const searchResults = state.search.searchResults;
+                                addCandidate(candidates, searchResults.results, searchResults.totalRestaurantCount || searchResults.totalResults, `${prefix}.search.searchResults.results`);
+                            }
                             if (state?.searchResults?.restaurants) {
                                 const searchResults = state.searchResults;
                                 addCandidate(candidates, searchResults.restaurants, searchResults.totalRestaurantCount || searchResults.totalResults, `${prefix}.searchResults`);
                             }
+                            if (state?.searchResults?.results) {
+                                const searchResults = state.searchResults;
+                                addCandidate(candidates, searchResults.results, searchResults.totalRestaurantCount || searchResults.totalResults, `${prefix}.searchResults.results`);
+                            }
                             if (state?.availability?.restaurants) addCandidate(candidates, state.availability.restaurants, state.availability.totalResults, `${prefix}.availability.restaurants`);
                             if (state?.discovery?.restaurants) addCandidate(candidates, state.discovery.restaurants, state.discovery.totalResults, `${prefix}.discovery.restaurants`);
                             return candidates.sort((a, b) => b.restaurants.length - a.restaurants.length)[0] || null;
+                        };
+
+                        const extractFromApolloCache = (cache) => {
+                            if (!cache || typeof cache !== 'object') return null;
+                            const root = cache.ROOT_QUERY || cache['ROOT_QUERY'];
+                            if (!root || typeof root !== 'object') return null;
+                            const lists = [];
+                            const collectRestaurants = (value) => {
+                                if (!value || typeof value !== 'object') return;
+                                if (Array.isArray(value)) {
+                                    const mapped = value.map((item) => {
+                                        if (!item) return null;
+                                        if (item.__ref && cache[item.__ref]) return cache[item.__ref];
+                                        if (typeof item === 'string' && cache[item]) return cache[item];
+                                        return item;
+                                    }).filter(Boolean);
+                                    const filtered = mapped.filter(isLikelyRestaurant);
+                                    if (filtered.length) lists.push(filtered);
+                                    return;
+                                }
+                                for (const child of Object.values(value)) {
+                                    if (child && typeof child === 'object') collectRestaurants(child);
+                                }
+                            };
+                            for (const value of Object.values(root)) {
+                                collectRestaurants(value);
+                            }
+                            if (!lists.length) return null;
+                            lists.sort((a, b) => b.length - a.length);
+                            return lists[0];
                         };
 
                         const findBestRestaurantArray = (root, maxDepth = 6) => {
@@ -1261,6 +1348,10 @@ try {
                                 }
                             }
                             addCandidate(candidates, apolloRestaurants, apolloRestaurants.length, 'apollo_state');
+                            const apolloList = extractFromApolloCache(apolloState);
+                            if (apolloList?.length) {
+                                addCandidate(candidates, apolloList, apolloList.length, 'apollo_cache');
+                            }
                         }
 
                         const scanTargets = [initialState, nextData, nextState, apolloState].filter(Boolean);
@@ -1413,15 +1504,18 @@ try {
                     return saved - savedBefore;
                 };
 
-                const apiTemplate = request.userData.apiTemplate;
-                const useApiPagination = Boolean(apiTemplate);
-                const allowScroll = !useApiPagination;
-                if (useApiPagination) {
-                    const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
-                    log.info(`Using API pagination via ${opname}`);
-                }
+                let useApiPagination = false;
+                let apiTemplate = null;
+                let allowScroll = true;
 
                 while (saved < RESULTS_WANTED && pageNumber <= maxPages) {
+                    if (request.userData.apiTemplate && !useApiPagination) {
+                        apiTemplate = request.userData.apiTemplate;
+                        useApiPagination = true;
+                        allowScroll = false;
+                        const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
+                        log.info(`Using API pagination via ${opname}`);
+                    }
                     await waitForResultsReady();
                     let snapshot = await collectSnapshot();
                     let restaurants = snapshot.bestCandidate.restaurants || [];
@@ -1434,7 +1528,7 @@ try {
                         log.warning(`No restaurants found on page ${pageNumber}.`);
                     }
 
-                    const shouldScroll = allowScroll && restaurants.length < RESULTS_WANTED && (totalCount === 0 || restaurants.length < totalCount);
+                    const shouldScroll = allowScroll && restaurants.length < RESULTS_WANTED;
                     if (shouldScroll) {
                         log.info('Scrolling to load more restaurants...');
 
@@ -1480,7 +1574,7 @@ try {
                         break;
                     }
 
-                    if (useApiPagination && pageNumber === 1) {
+                    if (useApiPagination && pageNumber === 1 && apiTemplate) {
                         let apiPage = 2;
                         let pageSize = derivePageSize(apiTemplate.variables, restaurants.length || 50);
                         let apiTotal = totalCount;
