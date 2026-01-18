@@ -27,11 +27,19 @@ const normalizeUrl = (value) => {
     if (!value || typeof value !== 'string') return null;
     const trimmed = value.trim();
     if (!trimmed) return null;
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
-    if (trimmed.startsWith('//')) return `https:${trimmed}`;
-    if (trimmed.startsWith('/')) return `https://www.opentable.com${trimmed}`;
-    if (trimmed.includes('opentable.com/')) return `https://${trimmed.replace(/^https?:\/\//, '')}`;
-    return null;
+    let normalized = null;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) normalized = trimmed;
+    else if (trimmed.startsWith('//')) normalized = `https:${trimmed}`;
+    else if (trimmed.startsWith('/')) normalized = `https://www.opentable.com${trimmed}`;
+    else if (trimmed.includes('opentable.com/')) normalized = `https://${trimmed.replace(/^https?:\/\//, '')}`;
+    if (!normalized) return null;
+    try {
+        const parsed = new URL(normalized);
+        parsed.hash = '';
+        return parsed.href;
+    } catch {
+        return normalized.split('#')[0];
+    }
 };
 
 const extractSlugFromUrl = (value) => {
@@ -87,6 +95,7 @@ const getRestaurantReviewsCount = (value) => value?.reviewCount
     || value?.reviewsCount
     || value?.numberOfReviews
     || value?.review_count
+    || value?.reviews_count
     || value?.reviews?.count
     || value?.reviews?.total
     || value?.reviews?.reviewCount
@@ -98,6 +107,8 @@ const getRestaurantImage = (value) => value?.primaryPhoto?.uri
     || value?.photo?.url
     || value?.image?.url
     || value?.image?.src
+    || (typeof value?.photo === 'string' ? value.photo : null)
+    || (typeof value?.image === 'string' ? value.image : null)
     || value?.imageUrl
     || value?.image_url
     || value?.photos?.[0]?.url
@@ -105,7 +116,7 @@ const getRestaurantImage = (value) => value?.primaryPhoto?.uri
     || null;
 
 const hasRestaurantMeta = (value) => Boolean(
-    value?.priceBand || value?.priceRange || value?.priceCategory
+    value?.priceBand || value?.priceRange || value?.priceCategory || value?.price_range
     || getRestaurantRating(value) || getRestaurantReviewsCount(value)
     || value?.cuisine || value?.primaryCuisine || value?.cuisines,
 );
@@ -170,7 +181,7 @@ const scoreRestaurantCandidate = (value) => {
     if (getCandidateName(value)) score += 3;
     if (value.rid || value.restaurantId || value.id || value.restaurant_id) score += 2;
     if (value.profileLink || value.canonicalUrl || value.url || value.slug) score += 2;
-    if (value.priceBand || value.priceRange || value.price || value.priceCategory) score += 1;
+    if (value.priceBand || value.priceRange || value.price || value.priceCategory || value.price_range) score += 1;
     if (value.starRating || value.rating || value.reviewScore || value.reviewRating) score += 1;
     if (value.cuisine || value.primaryCuisine || value.cuisines) score += 1;
     return score;
@@ -273,7 +284,8 @@ const normalizeRestaurant = (r, detail) => {
             || extra?.cuisine
             || primaryCuisine,
         price_range: base?.priceBand || base?.priceRange || base?.price || base?.priceCategory
-            || extra?.priceBand || extra?.priceRange || extra?.price || extra?.priceCategory
+            || base?.price_range
+            || extra?.priceBand || extra?.priceRange || extra?.price || extra?.priceCategory || extra?.price_range
             || null,
         rating: getRestaurantRating(base) || getRestaurantRating(extra),
         reviews_count: getRestaurantReviewsCount(base) || getRestaurantReviewsCount(extra),
@@ -515,11 +527,19 @@ try {
                             if (!value || typeof value !== 'string') return null;
                             const trimmed = value.trim();
                             if (!trimmed) return null;
-                            if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
-                            if (trimmed.startsWith('//')) return `https:${trimmed}`;
-                            if (trimmed.startsWith('/')) return `https://www.opentable.com${trimmed}`;
-                            if (trimmed.includes('opentable.com/')) return `https://${trimmed.replace(/^https?:\/\//, '')}`;
-                            return null;
+                            let normalized = null;
+                            if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) normalized = trimmed;
+                            else if (trimmed.startsWith('//')) normalized = `https:${trimmed}`;
+                            else if (trimmed.startsWith('/')) normalized = `https://www.opentable.com${trimmed}`;
+                            else if (trimmed.includes('opentable.com/')) normalized = `https://${trimmed.replace(/^https?:\/\//, '')}`;
+                            if (!normalized) return null;
+                            try {
+                                const parsed = new URL(normalized);
+                                parsed.hash = '';
+                                return parsed.href;
+                            } catch {
+                                return normalized.split('#')[0];
+                            }
                         };
                         const extractSlugFromUrl = (value) => {
                             if (!value || typeof value !== 'string') return null;
@@ -565,6 +585,7 @@ try {
                             || value?.reviewsCount
                             || value?.numberOfReviews
                             || value?.review_count
+                            || value?.reviews_count
                             || value?.reviews?.count
                             || value?.reviews?.total
                             || value?.reviews?.reviewCount
@@ -575,13 +596,15 @@ try {
                             || value?.photo?.url
                             || value?.image?.url
                             || value?.image?.src
+                            || (typeof value?.photo === 'string' ? value.photo : null)
+                            || (typeof value?.image === 'string' ? value.image : null)
                             || value?.imageUrl
                             || value?.image_url
                             || value?.photos?.[0]?.url
                             || value?.images?.[0]?.url
                             || null;
                         const hasRestaurantMeta = (value) => Boolean(
-                            value?.priceBand || value?.priceRange || value?.priceCategory
+                            value?.priceBand || value?.priceRange || value?.priceCategory || value?.price_range
                             || getRestaurantRating(value) || getRestaurantReviewsCount(value)
                             || value?.cuisine || value?.primaryCuisine || value?.cuisines,
                         );
@@ -592,7 +615,7 @@ try {
                             if (getCandidateName(value)) score += 3;
                             if (value.rid || value.restaurantId || value.id || value.restaurant_id) score += 2;
                             if (value.profileLink || value.canonicalUrl || value.url || value.slug) score += 2;
-                            if (value.priceBand || value.priceRange || value.price || value.priceCategory) score += 1;
+                            if (value.priceBand || value.priceRange || value.price || value.priceCategory || value.price_range) score += 1;
                             if (value.starRating || value.rating || value.reviewScore || value.reviewRating) score += 1;
                             if (value.cuisine || value.primaryCuisine || value.cuisines) score += 1;
                             return score;
@@ -647,16 +670,48 @@ try {
                         const extractRestaurantCardsFromDom = () => {
                             const results = [];
                             const seen = new Set();
-                            const getBestImage = (img) => {
-                                if (!img) return null;
-                                const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
-                                if (srcset) {
-                                    const parts = srcset.split(',').map((part) => part.trim()).filter(Boolean);
-                                    const last = parts[parts.length - 1] || '';
-                                    const url = last.split(' ')[0];
-                                    return normalizeUrl(url) || url || null;
+                            const getBestImage = (img, container) => {
+                                const attrUrl = container?.getAttribute('data-image-url') || container?.getAttribute('data-image') || '';
+                                if (attrUrl) {
+                                    const normalizedAttr = normalizeUrl(attrUrl);
+                                    if (normalizedAttr) return normalizedAttr;
                                 }
-                                return normalizeUrl(img.getAttribute('src') || img.getAttribute('data-src') || '') || null;
+                                if (img) {
+                                    const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
+                                    if (srcset) {
+                                        const parts = srcset.split(',').map((part) => part.trim()).filter(Boolean);
+                                        const last = parts[parts.length - 1] || '';
+                                        const url = last.split(' ')[0];
+                                        return normalizeUrl(url) || url || null;
+                                    }
+                                    const direct = img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                    const normalized = normalizeUrl(direct);
+                                    if (normalized) return normalized;
+                                }
+                                const dataImgEl = container?.querySelector('[data-src], [data-srcset], [data-image], [data-background], [data-bg]');
+                                if (dataImgEl) {
+                                    const dataUrl = dataImgEl.getAttribute('data-src')
+                                        || dataImgEl.getAttribute('data-image')
+                                        || dataImgEl.getAttribute('data-background')
+                                        || dataImgEl.getAttribute('data-bg')
+                                        || '';
+                                    const normalizedData = normalizeUrl(dataUrl);
+                                    if (normalizedData) return normalizedData;
+                                    const dataSrcset = dataImgEl.getAttribute('data-srcset') || '';
+                                    if (dataSrcset) {
+                                        const parts = dataSrcset.split(',').map((part) => part.trim()).filter(Boolean);
+                                        const last = parts[parts.length - 1] || '';
+                                        const url = last.split(' ')[0];
+                                        return normalizeUrl(url) || url || null;
+                                    }
+                                }
+                                const bgEl = container?.querySelector('[style*="background-image"]');
+                                const bgValue = bgEl?.style?.backgroundImage || bgEl?.getAttribute('style') || '';
+                                const bgMatch = String(bgValue).match(/url\(["']?([^"')]+)["']?\)/i);
+                                if (bgMatch?.[1]) {
+                                    return normalizeUrl(bgMatch[1]) || bgMatch[1];
+                                }
+                                return null;
                             };
                             const parseNumber = (text) => {
                                 if (!text) return null;
@@ -679,20 +734,147 @@ try {
                                 };
                             };
 
-                            const anchors = Array.from(document.querySelectorAll('main a[href*="/r/"], a[href^="/r/"]'));
-                            for (const a of anchors) {
-                                const href = a.getAttribute('href') || '';
-                                const url = normalizeUrl(href) || null;
-                                if (!url) continue;
-                                const slug = extractSlugFromUrl(url);
-                                if (!slug) continue;
+                            const findCardContainer = (anchor) => {
+                                let el = anchor;
+                                for (let i = 0; i < 6 && el; i++) {
+                                    if (el.matches?.('[data-test*="restaurant"], [data-testid*="restaurant"], article, li')) return el;
+                                    const hasName = el.querySelector?.('h1, h2, h3, [data-test*="name"], [data-testid*="name"]');
+                                    const hasLink = el.querySelector?.('a[href*="/r/"], a[href^="/r/"]');
+                                    if (el.tagName === 'DIV' && hasName && hasLink) return el;
+                                    el = el.parentElement;
+                                }
+                                return anchor;
+                            };
 
-                                const container = a.closest('[data-test*="restaurant"], [data-testid*="restaurant"], article, li, div') || a;
+                            const anchors = Array.from(document.querySelectorAll('main a[href*="/r/"], a[href^="/r/"]'));
+                            const containers = new Set();
+                            for (const a of anchors) {
+                                const container = findCardContainer(a);
+                                containers.add(container);
+                            }
+
+                            const extractMetaFromLines = (lines, name) => {
+                                let cuisine = null;
+                                let neighborhood = null;
+                                let city = null;
+                                let price_range = null;
+
+                                const isNoise = (line) => {
+                                    const lower = line.toLowerCase();
+                                    if (name && lower === name.toLowerCase()) return true;
+                                    if (/\d\.\d/.test(line) && /review|star|rating/i.test(lower)) return true;
+                                    if (/reviews?/i.test(lower) && /\d/.test(line)) return true;
+                                    if (/reserve|book|table|available|times?|pm|am|seats?/i.test(lower)) return true;
+                                    if (/open table|opentable/i.test(lower)) return true;
+                                    return false;
+                                };
+
+                                const filtered = lines.filter((line) => line && !isNoise(line));
+                                const parseMetaFromLine = (line) => {
+                                    const labelMatch = line.match(/^(cuisine|neighborhood|location|city|price)\s*[:\-]\s*(.+)$/i);
+                                    if (labelMatch) {
+                                        const label = labelMatch[1].toLowerCase();
+                                        const value = labelMatch[2].trim();
+                                        if (label === 'cuisine' && !cuisine) cuisine = value;
+                                        if ((label === 'neighborhood' || label === 'location') && !neighborhood) neighborhood = value;
+                                        if (label === 'city' && !city) city = value;
+                                        if (label === 'price' && !price_range) {
+                                            const priceMatch = value.match(/\${1,4}/);
+                                            price_range = priceMatch ? priceMatch[0] : value;
+                                        }
+                                        return;
+                                    }
+
+                                    const parts = line.split(/[•·]/).map((p) => p.trim()).filter(Boolean);
+                                    const priceMatch = line.match(/\${1,4}/);
+                                    const price = priceMatch ? priceMatch[0] : null;
+                                    if (price && !price_range) price_range = price;
+                                    if (parts.length >= 2) {
+                                        const priceIndex = parts.findIndex((p) => /\$/.test(p));
+                                        const others = parts.filter((_, idx) => idx !== priceIndex);
+                                        if (others.length === 1) {
+                                            if (!cuisine) cuisine = others[0];
+                                        } else if (others.length >= 2) {
+                                            if (!neighborhood) neighborhood = others[0];
+                                            if (!cuisine) cuisine = others[others.length - 1];
+                                        }
+                                    } else if (price) {
+                                        const leftover = line.replace(price, '').replace(/[•·]/g, '').trim();
+                                        if (leftover && !cuisine) cuisine = leftover;
+                                    }
+                                };
+
+                                for (const line of filtered) {
+                                    if (/\$/.test(line) || /[•·]/.test(line)) {
+                                        parseMetaFromLine(line);
+                                    }
+                                }
+
+                                for (const line of filtered) {
+                                    if (/cuisine\s*[:\-]/i.test(line) || /neighborhood\s*[:\-]/i.test(line) || /location\s*[:\-]/i.test(line) || /city\s*[:\-]/i.test(line) || /price\s*[:\-]/i.test(line)) {
+                                        parseMetaFromLine(line);
+                                        continue;
+                                    }
+                                    if (/\$/.test(line)) continue;
+                                    if (!neighborhood) {
+                                        if (line.includes(',')) {
+                                            const parts = line.split(',').map((p) => p.trim()).filter(Boolean);
+                                            neighborhood = parts[0] || neighborhood;
+                                            city = parts.slice(1).join(', ') || city;
+                                        } else if (line.length <= 60) {
+                                            neighborhood = line;
+                                        }
+                                    } else if (!city && line.includes(',')) {
+                                        const parts = line.split(',').map((p) => p.trim()).filter(Boolean);
+                                        city = parts.slice(1).join(', ') || city;
+                                    }
+                                }
+
+                                return { cuisine, neighborhood, city, price_range };
+                            };
+
+                            for (const container of containers) {
+                                if (!container) continue;
                                 const ridAttr = container.getAttribute('data-rid')
                                     || container.getAttribute('data-restaurant-id')
                                     || container.getAttribute('data-restaurantid')
                                     || container.getAttribute('data-id');
                                 let rid = ridAttr && String(ridAttr).match(/\d+/)?.[0] ? Number(String(ridAttr).match(/\d+/)[0]) : null;
+
+                                const nameEl = container.querySelector('h1, h2, h3, [data-test*="name"], [data-testid*="name"]');
+                                const name = (nameEl?.textContent || '').replace(/\s+/g, ' ').trim();
+                                if (!name || name.length > 140) continue;
+                                const nameKey = normalizeNameKey(name);
+
+                                const anchorEls = Array.from(container.querySelectorAll('a[href*="/r/"], a[href^="/r/"]'));
+                                let bestUrl = null;
+                                let bestScore = -1;
+                                for (const anchor of anchorEls) {
+                                    const href = anchor.getAttribute('href') || '';
+                                    if (!href) continue;
+                                    if (/reviews?/i.test(href) && href.includes('#')) continue;
+                                    const candidateUrl = normalizeUrl(href);
+                                    if (!candidateUrl) continue;
+                                    const slug = extractSlugFromUrl(candidateUrl);
+                                    if (!slug) continue;
+                                    let score = 0;
+                                    const anchorText = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
+                                    if (anchorText && anchorText.toLowerCase().includes(name.toLowerCase())) score += 3;
+                                    const testId = `${anchor.getAttribute('data-test') || ''} ${anchor.getAttribute('data-testid') || ''}`;
+                                    if (/name/i.test(testId)) score += 2;
+                                    if (nameEl && anchor.contains(nameEl)) score += 2;
+                                    score += 1;
+                                    if (score > bestScore) {
+                                        bestScore = score;
+                                        bestUrl = candidateUrl;
+                                    }
+                                }
+
+                                const url = bestUrl || null;
+                                if (!url) continue;
+                                const slug = extractSlugFromUrl(url);
+                                if (!slug) continue;
+
                                 if (!rid) {
                                     try {
                                         const parsed = new URL(url);
@@ -703,21 +885,57 @@ try {
                                     }
                                 }
 
-                                const nameEl = container.querySelector('h1, h2, h3, [data-test*="name"], [data-testid*="name"]') || a;
-                                const name = (nameEl?.textContent || '').replace(/\s+/g, ' ').trim();
-                                if (!name || name.length > 140) continue;
-                                const nameKey = normalizeNameKey(name);
                                 const dedupeKey = `${slug}|${nameKey}`;
                                 if (seen.has(dedupeKey)) continue;
                                 seen.add(dedupeKey);
 
                                 const img = container.querySelector('img');
-                                const image_url = getBestImage(img);
+                                const image_url = getBestImage(img, container);
+
+                                const reviewAnchor = anchorEls.find((anchor) => /reviews?/i.test(anchor.getAttribute('href') || ''));
+                                const reviewText = reviewAnchor?.textContent || '';
 
                                 const ariaText = (container.getAttribute('aria-label') || '')
                                     + ' ' + (container.querySelector('[aria-label*="rating"], [aria-label*="stars"]')?.getAttribute('aria-label') || '');
-                                const text = `${container.textContent || ''} ${ariaText}`;
+                                const text = `${container.textContent || ''} ${ariaText} ${reviewText}`;
                                 const { rating, reviews_count } = parseRatingAndReviews(text);
+
+                                const metaSelectors = [
+                                    '[data-test*="cuisine"]',
+                                    '[data-testid*="cuisine"]',
+                                    '[data-test*="neighborhood"]',
+                                    '[data-testid*="neighborhood"]',
+                                    '[data-test*="location"]',
+                                    '[data-testid*="location"]',
+                                    '[data-test*="price"]',
+                                    '[data-testid*="price"]',
+                                    '[data-test*="metadata"]',
+                                    '[data-testid*="metadata"]',
+                                ];
+                                const metaLines = new Set();
+                                for (const selector of metaSelectors) {
+                                    container.querySelectorAll(selector).forEach((el) => {
+                                        const textLine = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                                        if (textLine) metaLines.add(textLine);
+                                    });
+                                }
+                                const containerLines = (container.innerText || '')
+                                    .split('\n')
+                                    .map((line) => line.replace(/\s+/g, ' ').trim())
+                                    .filter(Boolean);
+                                const allLines = [...metaLines, ...containerLines];
+                                const meta = extractMetaFromLines(allLines, name);
+
+                                const cityAttr = container.getAttribute('data-city') || container.getAttribute('data-location-city');
+                                const neighborhoodAttr = container.getAttribute('data-neighborhood') || container.getAttribute('data-location-neighborhood');
+                                const priceAttr = container.getAttribute('data-price') || container.getAttribute('data-price-range');
+                                const cuisineAttr = container.getAttribute('data-cuisine') || container.getAttribute('data-primary-cuisine');
+                                let derivedCity = null;
+                                const nameParts = name.split(/\s[-–—]\s/).map((part) => part.trim()).filter(Boolean);
+                                if (nameParts.length >= 2) {
+                                    const tail = nameParts[nameParts.length - 1];
+                                    if (tail.length <= 40) derivedCity = tail;
+                                }
 
                                 results.push({
                                     rid,
@@ -727,6 +945,10 @@ try {
                                     rating,
                                     reviews_count,
                                     slug,
+                                    city: cityAttr || meta.city || derivedCity || null,
+                                    neighborhood: neighborhoodAttr || meta.neighborhood || null,
+                                    cuisine: cuisineAttr || meta.cuisine || null,
+                                    price_range: priceAttr || meta.price_range || null,
                                 });
                             }
                             return results;
