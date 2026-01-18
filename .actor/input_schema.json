@@ -1,0 +1,67 @@
+{
+  "title": "OpenTable Restaurants Scraper",
+  "description": "Scrape restaurant data from OpenTable. Provide a start URL or use search parameters to find restaurants.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "start_url": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "OpenTable search or collection URL to scrape restaurants from.",
+      "editor": "textfield",
+      "prefill": "https://www.opentable.com/s?dateTime=2026-01-20T19%3A00%3A00&covers=2&metroId=4"
+    },
+    "date": {
+      "title": "Date",
+      "type": "string",
+      "description": "Reservation date in YYYY-MM-DD format (e.g., 2026-01-20).",
+      "editor": "textfield",
+      "prefill": "2026-01-20"
+    },
+    "time": {
+      "title": "Time",
+      "type": "string",
+      "description": "Reservation time in HH:MM format (e.g., 19:00 for 7 PM).",
+      "editor": "textfield",
+      "prefill": "19:00"
+    },
+    "covers": {
+      "title": "Party Size",
+      "type": "integer",
+      "description": "Number of people for the reservation.",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 2,
+      "editor": "number"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "City or neighborhood to search for restaurants (e.g., 'Los Angeles', 'New York').",
+      "editor": "textfield",
+      "prefill": "Los Angeles"
+    },
+    "results_wanted": {
+      "title": "Maximum number of restaurants",
+      "type": "integer",
+      "description": "The maximum number of restaurants to collect.",
+      "minimum": 1,
+      "default": 20,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for reliable scraping.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

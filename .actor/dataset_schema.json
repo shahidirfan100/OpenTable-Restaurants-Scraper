@@ -1,0 +1,58 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "name",
+          "cuisine",
+          "price_range",
+          "rating",
+          "reviews_count",
+          "neighborhood",
+          "booking_slots",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "name": {
+            "label": "Restaurant Name",
+            "format": "text"
+          },
+          "cuisine": {
+            "label": "Cuisine",
+            "format": "text"
+          },
+          "price_range": {
+            "label": "Price Range",
+            "format": "text"
+          },
+          "rating": {
+            "label": "Rating",
+            "format": "text"
+          },
+          "reviews_count": {
+            "label": "Reviews",
+            "format": "text"
+          },
+          "neighborhood": {
+            "label": "Neighborhood",
+            "format": "text"
+          },
+          "booking_slots": {
+            "label": "Available Times",
+            "format": "text"
+          },
+          "url": {
+            "label": "URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}
