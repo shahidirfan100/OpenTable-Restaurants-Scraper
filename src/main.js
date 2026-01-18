@@ -549,7 +549,7 @@ try {
                         const data = await response.json();
                         const extracted = extractRestaurantsFromData(data);
                         if (!extracted.restaurants.length) return;
-                        if (extracted.restaurants.length < 40) return;
+                        if (extracted.restaurants.length < 2) return;
 
                         const req = response.request();
                         const template = extractGraphqlTemplate(url, req.method(), req.postData());
@@ -607,6 +607,14 @@ try {
                 }
 
                 let pageSize = derivePageSize(bestTemplate.variables, DEFAULT_PAGE_SIZE);
+
+                // FIX: Adjust pageSize if the server enforces a lower limit than observed/defaults
+                // This prevents skipping items when calculating offsets (e.g. asking for 50, getting 20, then skipping to 50)
+                if (firstRestaurants.length > 0 && firstRestaurants.length < pageSize) {
+                    log.info(`Adjusted page size tracking from ${pageSize} to ${firstRestaurants.length} based on actual API response.`);
+                    pageSize = firstRestaurants.length;
+                }
+
                 let apiTotal = bestFirstPage?.totalCount || 0;
                 let apiPage = 2;
                 let noProgress = 0;
