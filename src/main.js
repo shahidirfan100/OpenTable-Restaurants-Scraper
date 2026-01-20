@@ -1594,39 +1594,85 @@ try {
                     if (shouldScroll) {
                         log.info('Scrolling to load more restaurants...');
 
-                        let previousCount = restaurants.length;
+                        let previousJsonCount = request.userData.jsonCandidates?.length || 0;
                         let scrollAttempts = 0;
-                        const maxScrolls = Math.max(30, Math.ceil((RESULTS_WANTED - saved) / 10)); // Adaptive max scrolls
+                        const maxScrolls = Math.max(30, Math.ceil((RESULTS_WANTED - saved) / 10));
 
-                        while (scrollAttempts < maxScrolls && saved + (restaurants.length - previousCount + previousCount) < RESULTS_WANTED + 50) {
-                            await page.evaluate(() => {
-                                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-                            });
-                            await page.waitForTimeout(2000); // Increased wait for dynamic content
+                        while (scrollAttempts < maxScrolls && saved < RESULTS_WANTED) {
+                            // Scroll in steps to trigger lazy loading
+                            const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
+                            const viewHeight = await page.evaluate(() => window.innerHeight);
+                            const currentScroll = await page.evaluate(() => window.scrollY);
+                            const targetScroll = Math.min(currentScroll + viewHeight * 2, scrollHeight);
 
+                            await page.evaluate((target) => {
+                                window.scrollTo({ top: target, behavior: 'smooth' });
+                            }, targetScroll);
+
+                            // Wait for network activity to complete
+                            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                            await page.waitForTimeout(1500);
+
+                            // Check if new API responses came in
+                            const currentJsonCount = request.userData.jsonCandidates?.length || 0;
+
+                            // Collect new snapshot with fresh data
                             const updatedSnapshot = await collectSnapshot();
                             const updatedRestaurants = updatedSnapshot.bestCandidate.restaurants || [];
 
-                            if (updatedRestaurants.length > previousCount) {
+                            // Check for new unique restaurants
+                            let newUniqueCount = 0;
+                            for (const r of updatedRestaurants) {
+                                const id = getRestaurantId(r);
+                                const url = getRestaurantUrl(r);
+                                const nameKey = normalizeNameKey(getCandidateName(r));
+                                const isNew =
+                                    (id !== null && id !== undefined && !seenIds.has(String(id))) ||
+                                    (!id && url && !seenUrls.has(url)) ||
+                                    (!id && !url && nameKey && !seenNames.has(nameKey));
+                                if (isNew) newUniqueCount++;
+                            }
+
+                            if (newUniqueCount > 0 || currentJsonCount > previousJsonCount) {
                                 restaurants = updatedRestaurants;
                                 totalCount = updatedSnapshot.bestCandidate.totalCount || totalCount;
                                 detailIndex = updatedSnapshot.detailIndex;
-                                previousCount = updatedRestaurants.length;
-                                scrollAttempts = 0; // Reset attempts when we find new data
-                                log.info(`Loaded ${restaurants.length} restaurants after scroll`);
+                                previousJsonCount = currentJsonCount;
+                                scrollAttempts = 0;
+                                log.info(`Found ${newUniqueCount} new restaurants after scroll (total: ${updatedRestaurants.length})`);
+
+                                // Save incrementally during scroll
+                                const added = await pushRestaurants(restaurants, detailIndex);
+                                if (added > 0) {
+                                    log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
+                                }
                             } else {
                                 scrollAttempts += 1;
-                                // Try clicking "Load More" style buttons during scroll
-                                const loadMoreBtn = page.locator('button:has-text("Load"), button:has-text("Show More"), button:has-text("More restaurants")');
+
+                                // Try clicking "Load More" or "Show More" buttons
+                                const loadMoreBtn = page.locator('button:has-text("Load More"), button:has-text("Show More"), button:has-text("View more"), [data-test*="load-more"], [data-testid*="load-more"]');
                                 if (await loadMoreBtn.count() > 0) {
                                     try {
                                         await loadMoreBtn.first().click({ timeout: 3000 });
-                                        await page.waitForTimeout(2000);
+                                        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                                        await page.waitForTimeout(1500);
                                         scrollAttempts = 0;
-                                    } catch { /* ignore click failures */ }
+                                    } catch { /* ignore */ }
                                 }
                             }
-                            if (scrollAttempts >= 5) break; // Give up after 5 failed attempts
+
+                            // Check if we've scrolled to the absolute bottom
+                            const newScrollHeight = await page.evaluate(() => document.body.scrollHeight);
+                            const newScroll = await page.evaluate(() => window.scrollY + window.innerHeight);
+                            if (newScroll >= newScrollHeight - 100 && scrollAttempts >= 3) {
+                                log.info('Reached bottom of page.');
+                                break;
+                            }
+
+                            if (scrollAttempts >= 5) {
+                                log.info('No new content after 5 scroll attempts.');
+                                break;
+                            }
                         }
                     }
 
@@ -1647,44 +1693,14 @@ try {
                         break;
                     }
 
+                    // Skip external API pagination - it always fails with 403 (no cookies)
+                    // Rely on infinite scroll instead which happens within the browser context
                     if (useApiPagination && pageNumber === 1 && apiTemplate) {
-                        let apiPage = 2;
-                        let pageSize = derivePageSize(apiTemplate.variables, restaurants.length || 50);
-                        let apiTotal = totalCount;
-                        let apiSuccess = false;
-                        while (saved < RESULTS_WANTED && apiPage <= maxPages) {
-                            const apiResult = await fetchApiPage(apiTemplate, apiPage, pageSize, request.userData.userAgent);
-                            if (!apiResult || apiResult.error) {
-                                log.warning(`API pagination failed on page ${apiPage}: ${apiResult?.error || 'unknown error'}. Falling back to infinite scroll.`);
-                                useApiPagination = false;
-                                allowScroll = true;  // Enable scrolling for fallback
-                                break;
-                            }
-                            const extracted = extractRestaurantsFromData(apiResult.json);
-                            const apiRestaurants = extracted.restaurants || [];
-                            if (!apiRestaurants.length) {
-                                log.info(`No restaurants found in API page ${apiPage}. Stopping API pagination.`);
-                                break;
-                            }
-
-                            const apiDetails = [];
-                            if (Array.isArray(extracted.details)) apiDetails.push(...extracted.details);
-                            apiDetails.push(...apiRestaurants);
-                            const apiDetailIndex = buildRestaurantIndex(apiDetails);
-
-                            const addedApi = await pushRestaurants(apiRestaurants, apiDetailIndex);
-                            log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants (API page ${apiPage})`);
-
-                            apiTotal = extracted.totalCount || apiTotal;
-                            pageSize = apiResult.pageSize || pageSize;
-
-                            if (addedApi === 0) break;
-                            if (apiTotal && saved >= apiTotal) break;
-                            if (apiRestaurants.length < pageSize) break;
-                            apiPage += 1;
-                            apiSuccess = true;
-                        }
-                        if (apiSuccess) break;
+                        log.info('Skipping external API pagination (403 expected). Using browser-based infinite scroll.');
+                        useApiPagination = false;
+                        allowScroll = true;
+                        // Continue to next iteration to scroll on same page
+                        continue;
                     }
 
                     const moved = await goToNextPage();
