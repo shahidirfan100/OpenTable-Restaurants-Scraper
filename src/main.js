@@ -1347,8 +1347,8 @@ try {
                             if (known) candidates.push(known);
                         }
 
-                        let nextData = viewInitialState ? (window.__NEXT_DATA__ || null) : null;
-                        if (!nextData && viewInitialState) {
+                        let nextData = window.__NEXT_DATA__ || null;
+                        if (!nextData) {
                             const nextDataEl = document.getElementById('__NEXT_DATA__');
                             if (nextDataEl?.textContent) {
                                 try {
