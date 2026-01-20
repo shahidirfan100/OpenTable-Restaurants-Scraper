@@ -345,6 +345,8 @@ const fetchApiPage = async (template, page, pageSize, userAgent) => {
 const scoreApiTemplate = (template, restaurantsCount, detailsCount = 0) => {
     if (!template) return 0;
     const opname = String(template.operationName || template.queryParams?.opname || '');
+    // Filter out weak recommendation endpoints entirely
+    if (/HomeModuleLists|HomeModule|Recommended|FeaturedRestaurants/i.test(opname)) return -1000;
     let score = (restaurantsCount || 0) * 2 + (detailsCount || 0);
     if (/search|availability|results/i.test(opname)) score += 60;
     if (/RestaurantsAvailability|SearchAvailability/i.test(opname)) score += 40;
@@ -1338,9 +1340,8 @@ try {
                         };
 
                         const candidates = [];
-                        // Ignore initial state on subsequent pages as it's likely stale (SPA pagination)
-                        const viewInitialState = pageNumber === 1;
-                        const initialState = viewInitialState ? (window.__INITIAL_STATE__ || window.__PRELOADED_STATE__) : null;
+                        // Always try to extract from initial state - it may be updated after scrolling
+                        const initialState = window.__INITIAL_STATE__ || window.__PRELOADED_STATE__ || null;
                         if (initialState) {
                             const known = extractFromKnownPaths(initialState, 'initial_state');
                             if (known) candidates.push(known);
@@ -1512,10 +1513,30 @@ try {
                         'button[data-test*="pagination-next"]',
                         'button[data-testid*="pagination-next"]',
                         'button[aria-label*="More"]',
+                        'button:has-text("Load More")',
+                        'button:has-text("Show More")',
                     ];
                     for (const selector of buttonSelectors) {
                         const locator = page.locator(selector);
                         if (await clickLocator(locator)) return true;
+                    }
+
+                    // URL-based pagination fallback using startIndex parameter
+                    try {
+                        const urlObj = new URL(currentUrl);
+                        const currentStartIndex = parseInt(urlObj.searchParams.get('startIndex') || '0', 10);
+                        const newStartIndex = currentStartIndex + 50; // OpenTable uses 50 per page
+                        urlObj.searchParams.set('startIndex', String(newStartIndex));
+                        const nextUrl = urlObj.href;
+                        if (nextUrl !== currentUrl) {
+                            log.info(`Trying URL-based pagination with startIndex=${newStartIndex}`);
+                            await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
+                            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                            await page.waitForTimeout(1500);
+                            return true;
+                        }
+                    } catch (e) {
+                        log.warning(`URL-based pagination failed: ${e.message}`);
                     }
 
                     return false;
@@ -1569,19 +1590,19 @@ try {
                         log.warning(`No restaurants found on page ${pageNumber}.`);
                     }
 
-                    const shouldScroll = allowScroll && restaurants.length < RESULTS_WANTED;
+                    const shouldScroll = allowScroll && saved < RESULTS_WANTED;
                     if (shouldScroll) {
                         log.info('Scrolling to load more restaurants...');
 
                         let previousCount = restaurants.length;
                         let scrollAttempts = 0;
-                        const maxScrolls = 20;
+                        const maxScrolls = Math.max(30, Math.ceil((RESULTS_WANTED - saved) / 10)); // Adaptive max scrolls
 
-                        while (scrollAttempts < maxScrolls && saved + restaurants.length < RESULTS_WANTED) {
+                        while (scrollAttempts < maxScrolls && saved + (restaurants.length - previousCount + previousCount) < RESULTS_WANTED + 50) {
                             await page.evaluate(() => {
                                 window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
                             });
-                            await page.waitForTimeout(1500);
+                            await page.waitForTimeout(2000); // Increased wait for dynamic content
 
                             const updatedSnapshot = await collectSnapshot();
                             const updatedRestaurants = updatedSnapshot.bestCandidate.restaurants || [];
@@ -1591,10 +1612,21 @@ try {
                                 totalCount = updatedSnapshot.bestCandidate.totalCount || totalCount;
                                 detailIndex = updatedSnapshot.detailIndex;
                                 previousCount = updatedRestaurants.length;
+                                scrollAttempts = 0; // Reset attempts when we find new data
                                 log.info(`Loaded ${restaurants.length} restaurants after scroll`);
                             } else {
                                 scrollAttempts += 1;
+                                // Try clicking "Load More" style buttons during scroll
+                                const loadMoreBtn = page.locator('button:has-text("Load"), button:has-text("Show More"), button:has-text("More restaurants")');
+                                if (await loadMoreBtn.count() > 0) {
+                                    try {
+                                        await loadMoreBtn.first().click({ timeout: 3000 });
+                                        await page.waitForTimeout(2000);
+                                        scrollAttempts = 0;
+                                    } catch { /* ignore click failures */ }
+                                }
                             }
+                            if (scrollAttempts >= 5) break; // Give up after 5 failed attempts
                         }
                     }
 
@@ -1610,8 +1642,8 @@ try {
                     log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
                     if (saved >= RESULTS_WANTED) break;
                     if (totalCount > restaurants.length && saved >= totalCount) break;
-                    if (noProgressPages >= 2) {
-                        log.warning('Pagination stalled with no new restaurants. Stopping.');
+                    if (noProgressPages >= 3) {
+                        log.warning('Pagination stalled with no new restaurants after 3 attempts. Stopping.');
                         break;
                     }
 
@@ -1623,9 +1655,9 @@ try {
                         while (saved < RESULTS_WANTED && apiPage <= maxPages) {
                             const apiResult = await fetchApiPage(apiTemplate, apiPage, pageSize, request.userData.userAgent);
                             if (!apiResult || apiResult.error) {
-                                log.warning(`API pagination failed on page ${apiPage}: ${apiResult?.error || 'unknown error'}. Falling back to DOM pagination.`);
+                                log.warning(`API pagination failed on page ${apiPage}: ${apiResult?.error || 'unknown error'}. Falling back to infinite scroll.`);
                                 useApiPagination = false;
-                                allowScroll = false;
+                                allowScroll = true;  // Enable scrolling for fallback
                                 break;
                             }
                             const extracted = extractRestaurantsFromData(apiResult.json);
