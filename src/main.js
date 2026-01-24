@@ -227,11 +227,8 @@ const derivePageSize = (variables, fallback) => {
     const visit = (node) => {
         if (!node || typeof node !== 'object') return;
         for (const [key, value] of Object.entries(node)) {
-            const numeric = typeof value === 'number'
-                ? value
-                : (typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : null);
-            if (numeric !== null && /limit|pageSize|pagesize|perPage|per_page|size|count|take|first/i.test(key)) {
-                found = numeric;
+            if (typeof value === 'number' && /limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
+                found = value;
                 return;
             }
             if (typeof value === 'object') visit(value);
@@ -249,10 +246,7 @@ const updatePaginationVariables = (variables, page, pageSize) => {
     const visit = (node) => {
         if (!node || typeof node !== 'object') return;
         for (const [key, value] of Object.entries(node)) {
-            const numeric = typeof value === 'number'
-                ? value
-                : (typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : null);
-            if (numeric !== null) {
+            if (typeof value === 'number') {
                 if (/^(pageNumber|pageIndex|page)$/i.test(key)) {
                     node[key] = page;
                     updated = true;
@@ -269,21 +263,6 @@ const updatePaginationVariables = (variables, page, pageSize) => {
         }
     };
     visit(cloned);
-
-    // If nothing was updated, add a shallow pagination hint commonly used by OT APIs
-    if (!updated) {
-        const offset = Math.max(0, (page - 1) * pageSize);
-        cloned.page = page;
-        cloned.pageNumber = page;
-        cloned.pageIndex = page;
-        cloned.offset = offset;
-        cloned.startIndex = offset;
-        cloned.skip = offset;
-        cloned.limit = pageSize;
-        cloned.pageSize = pageSize;
-        updated = true;
-    }
-
     return { variables: cloned, updated };
 };
 
@@ -305,20 +284,6 @@ const updatePaginationParams = (params, page, pageSize) => {
             updated = true;
         }
     }
-
-    // If nothing changed, inject common params
-    if (!updated) {
-        updatedParams.page = String(page);
-        updatedParams.pageIndex = String(page);
-        updatedParams.pageNumber = String(page);
-        updatedParams.startIndex = String(Math.max(0, (page - 1) * pageSize));
-        updatedParams.from = updatedParams.startIndex;
-        updatedParams.offset = updatedParams.startIndex;
-        updatedParams.limit = String(pageSize);
-        updatedParams.pageSize = String(pageSize);
-        updated = true;
-    }
-
     return { params: updatedParams, updated };
 };
 
@@ -375,34 +340,6 @@ const fetchApiPage = async (template, page, pageSize, userAgent) => {
     }
     const json = await response.json();
     return { json, pageSize: requestConfig.pageSize };
-};
-
-const fetchApiPageInBrowser = async (template, pageNumber, pageSize, page, userAgent) => {
-    const requestConfig = buildApiRequest(template, pageNumber, pageSize);
-    if (!requestConfig) return { error: 'Invalid API template', pageSize };
-
-    return page.evaluate(async ({ cfg, ua }) => {
-        const headers = {
-            accept: 'application/json',
-            'accept-language': 'en-US,en;q=0.9',
-            'user-agent': ua,
-        };
-        if (cfg.method === 'POST') headers['content-type'] = 'application/json';
-
-        try {
-            const res = await fetch(cfg.url, {
-                method: cfg.method,
-                headers,
-                body: cfg.body,
-                credentials: 'include',
-            });
-            if (!res.ok) return { error: `API status ${res.status}`, pageSize: cfg.pageSize };
-            const json = await res.json();
-            return { json, pageSize: cfg.pageSize };
-        } catch (err) {
-            return { error: err?.message || 'API request failed', pageSize: cfg.pageSize };
-        }
-    }, { cfg: requestConfig, ua: userAgent || getRandomUserAgent() });
 };
 
 const scoreApiTemplate = (template, restaurantsCount, detailsCount = 0) => {
@@ -1590,8 +1527,6 @@ try {
                         const currentStartIndex = parseInt(urlObj.searchParams.get('startIndex') || '0', 10);
                         const newStartIndex = currentStartIndex + 50; // OpenTable uses 50 per page
                         urlObj.searchParams.set('startIndex', String(newStartIndex));
-                        urlObj.searchParams.set('page', String((newStartIndex / 50) + 1));
-                        urlObj.searchParams.set('from', String(newStartIndex));
                         const nextUrl = urlObj.href;
                         if (nextUrl !== currentUrl) {
                             log.info(`Trying URL-based pagination with startIndex=${newStartIndex}`);
@@ -1602,26 +1537,6 @@ try {
                         }
                     } catch (e) {
                         log.warning(`URL-based pagination failed: ${e.message}`);
-                    }
-
-                    // Explicit page param fallback even if startIndex wasn't present
-                    try {
-                        const urlObj = new URL(currentUrl);
-                        const currentPage = parseInt(urlObj.searchParams.get('page') || '1', 10);
-                        const nextPage = Math.max(2, currentPage + 1);
-                        urlObj.searchParams.set('page', String(nextPage));
-                        urlObj.searchParams.set('startIndex', String((nextPage - 1) * 50));
-                        urlObj.searchParams.set('from', String((nextPage - 1) * 50));
-                        const nextUrl = urlObj.href;
-                        if (nextUrl !== currentUrl) {
-                            log.info(`Trying page-based pagination with page=${nextPage}`);
-                            await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
-                            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-                            await page.waitForTimeout(1500);
-                            return true;
-                        }
-                    } catch (e) {
-                        log.warning(`Page-based pagination failed: ${e.message}`);
                     }
 
                     return false;
@@ -1651,18 +1566,17 @@ try {
                     return saved - savedBefore;
                 };
 
+                let useApiPagination = false;
                 let apiTemplate = null;
-                let apiPageSize = 50;
-                let apiPaginationDisabled = false;
                 let allowScroll = true;
-                let useApiPages = false;
 
                 while (saved < RESULTS_WANTED && pageNumber <= maxPages) {
-                    if (!apiPaginationDisabled && !apiTemplate && request.userData.apiTemplate) {
+                    if (request.userData.apiTemplate && !useApiPagination) {
                         apiTemplate = request.userData.apiTemplate;
+                        useApiPagination = true;
+                        allowScroll = false;
                         const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
-                        apiPageSize = derivePageSize(apiTemplate.variables, apiPageSize) || apiPageSize;
-                        log.info(`Captured API pagination template via ${opname}`);
+                        log.info(`Using API pagination via ${opname}`);
                     }
                     await waitForResultsReady();
                     let snapshot = await collectSnapshot();
@@ -1676,31 +1590,28 @@ try {
                         log.warning(`No restaurants found on page ${pageNumber}.`);
                     }
 
-                    const shouldScroll = !useApiPages && allowScroll && saved < RESULTS_WANTED;
+                    const shouldScroll = allowScroll && saved < RESULTS_WANTED;
                     if (shouldScroll) {
                         log.info('Scrolling to load more restaurants...');
 
                         let previousJsonCount = request.userData.jsonCandidates?.length || 0;
-                        let scrollSteps = 0;
-                        let stallCount = 0;
-                        const maxScrollSteps = Math.max(60, Math.ceil((RESULTS_WANTED - saved) / 5));
-                        const maxStall = 12;
+                        let scrollAttempts = 0;
+                        const maxScrolls = Math.max(30, Math.ceil((RESULTS_WANTED - saved) / 10));
 
-                        while (scrollSteps < maxScrollSteps && stallCount < maxStall && saved < RESULTS_WANTED) {
+                        while (scrollAttempts < maxScrolls && saved < RESULTS_WANTED) {
                             // Scroll in steps to trigger lazy loading
                             const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
                             const viewHeight = await page.evaluate(() => window.innerHeight);
                             const currentScroll = await page.evaluate(() => window.scrollY);
-                            const targetScroll = Math.min(currentScroll + viewHeight * 3, scrollHeight + viewHeight * 2);
+                            const targetScroll = Math.min(currentScroll + viewHeight * 2, scrollHeight);
 
                             await page.evaluate((target) => {
                                 window.scrollTo({ top: target, behavior: 'smooth' });
                             }, targetScroll);
 
                             // Wait for network activity to complete
-                            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
-                            await page.waitForTimeout(1800);
-                            scrollSteps += 1;
+                            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                            await page.waitForTimeout(1500);
 
                             // Check if new API responses came in
                             const currentJsonCount = request.userData.jsonCandidates?.length || 0;
@@ -1727,7 +1638,7 @@ try {
                                 totalCount = updatedSnapshot.bestCandidate.totalCount || totalCount;
                                 detailIndex = updatedSnapshot.detailIndex;
                                 previousJsonCount = currentJsonCount;
-                                stallCount = 0;
+                                scrollAttempts = 0;
                                 log.info(`Found ${newUniqueCount} new restaurants after scroll (total: ${updatedRestaurants.length})`);
 
                                 // Save incrementally during scroll
@@ -1736,7 +1647,7 @@ try {
                                     log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
                                 }
                             } else {
-                                stallCount += 1;
+                                scrollAttempts += 1;
 
                                 // Try clicking "Load More" or "Show More" buttons
                                 const loadMoreBtn = page.locator('button:has-text("Load More"), button:has-text("Show More"), button:has-text("View more"), [data-test*="load-more"], [data-testid*="load-more"]');
@@ -1745,7 +1656,7 @@ try {
                                         await loadMoreBtn.first().click({ timeout: 3000 });
                                         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
                                         await page.waitForTimeout(1500);
-                                        stallCount = 0;
+                                        scrollAttempts = 0;
                                     } catch { /* ignore */ }
                                 }
                             }
@@ -1753,20 +1664,15 @@ try {
                             // Check if we've scrolled to the absolute bottom
                             const newScrollHeight = await page.evaluate(() => document.body.scrollHeight);
                             const newScroll = await page.evaluate(() => window.scrollY + window.innerHeight);
-                            if (newScroll >= newScrollHeight - 150 && stallCount >= 3) {
+                            if (newScroll >= newScrollHeight - 100 && scrollAttempts >= 3) {
                                 log.info('Reached bottom of page.');
                                 break;
                             }
-                        }
 
-                        // One more forced bottom scroll in case content loads late
-                        if (saved < RESULTS_WANTED && stallCount >= maxStall - 1) {
-                            await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
-                            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
-                            await page.waitForTimeout(2000);
-                            const updatedSnapshot = await collectSnapshot();
-                            restaurants = updatedSnapshot.bestCandidate.restaurants || restaurants;
-                            detailIndex = updatedSnapshot.detailIndex || detailIndex;
+                            if (scrollAttempts >= 5) {
+                                log.info('No new content after 5 scroll attempts.');
+                                break;
+                            }
                         }
                     }
 
@@ -1787,45 +1693,16 @@ try {
                         break;
                     }
 
-                    let usedApiPage = false;
-                    if (apiTemplate && !apiPaginationDisabled && saved < RESULTS_WANTED) {
-                        const apiPageNumber = pageNumber + 1;
-                        const apiResult = await fetchApiPageInBrowser(apiTemplate, apiPageNumber, apiPageSize, page, request.userData.userAgent);
-                        if (apiResult?.json) {
-                            const extractedApi = extractRestaurantsFromData(apiResult.json);
-                            const apiRestaurants = extractedApi.restaurants || [];
-                            const apiDetails = extractedApi.details || [];
-                            const apiDetailIndex = buildRestaurantIndex([...apiDetails, ...apiRestaurants]);
-                            const addedFromApi = await pushRestaurants(apiRestaurants, apiDetailIndex);
-                            const apiTotalCount = extractedApi.totalCount || 0;
-
-                            if (addedFromApi > 0) {
-                                noProgressPages = 0;
-                                usedApiPage = true;
-                                useApiPages = true;
-                                apiPageSize = apiResult.pageSize || apiPageSize;
-                                pageNumber = apiPageNumber;
-                                log.info(`API pagination fetched ${apiRestaurants.length} restaurants from page ${apiPageNumber}`);
-                                if ((apiTotalCount && saved >= apiTotalCount)
-                                    || apiRestaurants.length < apiPageSize
-                                    || saved >= RESULTS_WANTED) {
-                                    log.info('API pagination reached the end of available results.');
-                                    break;
-                                }
-                            } else if (!apiRestaurants.length) {
-                                apiPaginationDisabled = true;
-                                useApiPages = false;
-                                log.info('API pagination returned no restaurants, falling back to DOM pagination.');
-                            }
-                        } else if (apiResult?.error) {
-                            apiPaginationDisabled = true;
-                            useApiPages = false;
-                            log.warning(`API pagination failed: ${apiResult.error}`);
-                        }
-                        if (usedApiPage) continue;
+                    // Skip external API pagination - it always fails with 403 (no cookies)
+                    // Rely on infinite scroll instead which happens within the browser context
+                    if (useApiPagination && pageNumber === 1 && apiTemplate) {
+                        log.info('Skipping external API pagination (403 expected). Using browser-based infinite scroll.');
+                        useApiPagination = false;
+                        allowScroll = true;
+                        // Continue to next iteration to scroll on same page
+                        continue;
                     }
 
-                    useApiPages = false;
                     const moved = await goToNextPage();
                     if (!moved) {
                         log.info('No next page detected. Stopping pagination.');
