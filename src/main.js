@@ -1624,23 +1624,26 @@ try {
                         log.info('Scrolling to load more restaurants...');
 
                         let previousJsonCount = request.userData.jsonCandidates?.length || 0;
-                        let scrollAttempts = 0;
-                        const maxScrolls = Math.max(30, Math.ceil((RESULTS_WANTED - saved) / 10));
+                        let scrollSteps = 0;
+                        let stallCount = 0;
+                        const maxScrollSteps = Math.max(60, Math.ceil((RESULTS_WANTED - saved) / 5));
+                        const maxStall = 12;
 
-                        while (scrollAttempts < maxScrolls && saved < RESULTS_WANTED) {
+                        while (scrollSteps < maxScrollSteps && stallCount < maxStall && saved < RESULTS_WANTED) {
                             // Scroll in steps to trigger lazy loading
                             const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
                             const viewHeight = await page.evaluate(() => window.innerHeight);
                             const currentScroll = await page.evaluate(() => window.scrollY);
-                            const targetScroll = Math.min(currentScroll + viewHeight * 2, scrollHeight);
+                            const targetScroll = Math.min(currentScroll + viewHeight * 3, scrollHeight + viewHeight * 2);
 
                             await page.evaluate((target) => {
                                 window.scrollTo({ top: target, behavior: 'smooth' });
                             }, targetScroll);
 
                             // Wait for network activity to complete
-                            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
-                            await page.waitForTimeout(1500);
+                            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
+                            await page.waitForTimeout(1800);
+                            scrollSteps += 1;
 
                             // Check if new API responses came in
                             const currentJsonCount = request.userData.jsonCandidates?.length || 0;
@@ -1667,7 +1670,7 @@ try {
                                 totalCount = updatedSnapshot.bestCandidate.totalCount || totalCount;
                                 detailIndex = updatedSnapshot.detailIndex;
                                 previousJsonCount = currentJsonCount;
-                                scrollAttempts = 0;
+                                stallCount = 0;
                                 log.info(`Found ${newUniqueCount} new restaurants after scroll (total: ${updatedRestaurants.length})`);
 
                                 // Save incrementally during scroll
@@ -1676,7 +1679,7 @@ try {
                                     log.info(`Saved ${saved}/${RESULTS_WANTED} restaurants`);
                                 }
                             } else {
-                                scrollAttempts += 1;
+                                stallCount += 1;
 
                                 // Try clicking "Load More" or "Show More" buttons
                                 const loadMoreBtn = page.locator('button:has-text("Load More"), button:has-text("Show More"), button:has-text("View more"), [data-test*="load-more"], [data-testid*="load-more"]');
@@ -1685,7 +1688,7 @@ try {
                                         await loadMoreBtn.first().click({ timeout: 3000 });
                                         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
                                         await page.waitForTimeout(1500);
-                                        scrollAttempts = 0;
+                                        stallCount = 0;
                                     } catch { /* ignore */ }
                                 }
                             }
@@ -1693,15 +1696,20 @@ try {
                             // Check if we've scrolled to the absolute bottom
                             const newScrollHeight = await page.evaluate(() => document.body.scrollHeight);
                             const newScroll = await page.evaluate(() => window.scrollY + window.innerHeight);
-                            if (newScroll >= newScrollHeight - 100 && scrollAttempts >= 3) {
+                            if (newScroll >= newScrollHeight - 150 && stallCount >= 3) {
                                 log.info('Reached bottom of page.');
                                 break;
                             }
+                        }
 
-                            if (scrollAttempts >= 5) {
-                                log.info('No new content after 5 scroll attempts.');
-                                break;
-                            }
+                        // One more forced bottom scroll in case content loads late
+                        if (saved < RESULTS_WANTED && stallCount >= maxStall - 1) {
+                            await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
+                            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
+                            await page.waitForTimeout(2000);
+                            const updatedSnapshot = await collectSnapshot();
+                            restaurants = updatedSnapshot.bestCandidate.restaurants || restaurants;
+                            detailIndex = updatedSnapshot.detailIndex || detailIndex;
                         }
                     }
 
