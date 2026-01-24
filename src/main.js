@@ -342,6 +342,34 @@ const fetchApiPage = async (template, page, pageSize, userAgent) => {
     return { json, pageSize: requestConfig.pageSize };
 };
 
+const fetchApiPageInBrowser = async (template, pageNumber, pageSize, page, userAgent) => {
+    const requestConfig = buildApiRequest(template, pageNumber, pageSize);
+    if (!requestConfig) return { error: 'Invalid API template', pageSize };
+
+    return page.evaluate(async ({ cfg, ua }) => {
+        const headers = {
+            accept: 'application/json',
+            'accept-language': 'en-US,en;q=0.9',
+            'user-agent': ua,
+        };
+        if (cfg.method === 'POST') headers['content-type'] = 'application/json';
+
+        try {
+            const res = await fetch(cfg.url, {
+                method: cfg.method,
+                headers,
+                body: cfg.body,
+                credentials: 'include',
+            });
+            if (!res.ok) return { error: `API status ${res.status}`, pageSize: cfg.pageSize };
+            const json = await res.json();
+            return { json, pageSize: cfg.pageSize };
+        } catch (err) {
+            return { error: err?.message || 'API request failed', pageSize: cfg.pageSize };
+        }
+    }, { cfg: requestConfig, ua: userAgent || getRandomUserAgent() });
+};
+
 const scoreApiTemplate = (template, restaurantsCount, detailsCount = 0) => {
     if (!template) return 0;
     const opname = String(template.operationName || template.queryParams?.opname || '');
@@ -1566,17 +1594,18 @@ try {
                     return saved - savedBefore;
                 };
 
-                let useApiPagination = false;
                 let apiTemplate = null;
+                let apiPageSize = 50;
+                let apiPaginationDisabled = false;
                 let allowScroll = true;
+                let useApiPages = false;
 
                 while (saved < RESULTS_WANTED && pageNumber <= maxPages) {
-                    if (request.userData.apiTemplate && !useApiPagination) {
+                    if (!apiPaginationDisabled && !apiTemplate && request.userData.apiTemplate) {
                         apiTemplate = request.userData.apiTemplate;
-                        useApiPagination = true;
-                        allowScroll = false;
                         const opname = apiTemplate.operationName || apiTemplate.queryParams?.opname || apiTemplate.url;
-                        log.info(`Using API pagination via ${opname}`);
+                        apiPageSize = derivePageSize(apiTemplate.variables, apiPageSize) || apiPageSize;
+                        log.info(`Captured API pagination template via ${opname}`);
                     }
                     await waitForResultsReady();
                     let snapshot = await collectSnapshot();
@@ -1590,7 +1619,7 @@ try {
                         log.warning(`No restaurants found on page ${pageNumber}.`);
                     }
 
-                    const shouldScroll = allowScroll && saved < RESULTS_WANTED;
+                    const shouldScroll = !useApiPages && allowScroll && saved < RESULTS_WANTED;
                     if (shouldScroll) {
                         log.info('Scrolling to load more restaurants...');
 
@@ -1693,16 +1722,45 @@ try {
                         break;
                     }
 
-                    // Skip external API pagination - it always fails with 403 (no cookies)
-                    // Rely on infinite scroll instead which happens within the browser context
-                    if (useApiPagination && pageNumber === 1 && apiTemplate) {
-                        log.info('Skipping external API pagination (403 expected). Using browser-based infinite scroll.');
-                        useApiPagination = false;
-                        allowScroll = true;
-                        // Continue to next iteration to scroll on same page
-                        continue;
+                    let usedApiPage = false;
+                    if (apiTemplate && !apiPaginationDisabled && saved < RESULTS_WANTED) {
+                        const apiPageNumber = pageNumber + 1;
+                        const apiResult = await fetchApiPageInBrowser(apiTemplate, apiPageNumber, apiPageSize, page, request.userData.userAgent);
+                        if (apiResult?.json) {
+                            const extractedApi = extractRestaurantsFromData(apiResult.json);
+                            const apiRestaurants = extractedApi.restaurants || [];
+                            const apiDetails = extractedApi.details || [];
+                            const apiDetailIndex = buildRestaurantIndex([...apiDetails, ...apiRestaurants]);
+                            const addedFromApi = await pushRestaurants(apiRestaurants, apiDetailIndex);
+                            const apiTotalCount = extractedApi.totalCount || 0;
+
+                            if (addedFromApi > 0) {
+                                noProgressPages = 0;
+                                usedApiPage = true;
+                                useApiPages = true;
+                                apiPageSize = apiResult.pageSize || apiPageSize;
+                                pageNumber = apiPageNumber;
+                                log.info(`API pagination fetched ${apiRestaurants.length} restaurants from page ${apiPageNumber}`);
+                                if ((apiTotalCount && saved >= apiTotalCount)
+                                    || apiRestaurants.length < apiPageSize
+                                    || saved >= RESULTS_WANTED) {
+                                    log.info('API pagination reached the end of available results.');
+                                    break;
+                                }
+                            } else if (!apiRestaurants.length) {
+                                apiPaginationDisabled = true;
+                                useApiPages = false;
+                                log.info('API pagination returned no restaurants, falling back to DOM pagination.');
+                            }
+                        } else if (apiResult?.error) {
+                            apiPaginationDisabled = true;
+                            useApiPages = false;
+                            log.warning(`API pagination failed: ${apiResult.error}`);
+                        }
+                        if (usedApiPage) continue;
                     }
 
+                    useApiPages = false;
                     const moved = await goToNextPage();
                     if (!moved) {
                         log.info('No next page detected. Stopping pagination.');
