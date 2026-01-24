@@ -227,8 +227,11 @@ const derivePageSize = (variables, fallback) => {
     const visit = (node) => {
         if (!node || typeof node !== 'object') return;
         for (const [key, value] of Object.entries(node)) {
-            if (typeof value === 'number' && /limit|pageSize|pagesize|perPage|per_page|size|count/i.test(key)) {
-                found = value;
+            const numeric = typeof value === 'number'
+                ? value
+                : (typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : null);
+            if (numeric !== null && /limit|pageSize|pagesize|perPage|per_page|size|count|take|first/i.test(key)) {
+                found = numeric;
                 return;
             }
             if (typeof value === 'object') visit(value);
@@ -246,7 +249,10 @@ const updatePaginationVariables = (variables, page, pageSize) => {
     const visit = (node) => {
         if (!node || typeof node !== 'object') return;
         for (const [key, value] of Object.entries(node)) {
-            if (typeof value === 'number') {
+            const numeric = typeof value === 'number'
+                ? value
+                : (typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : null);
+            if (numeric !== null) {
                 if (/^(pageNumber|pageIndex|page)$/i.test(key)) {
                     node[key] = page;
                     updated = true;
@@ -263,6 +269,21 @@ const updatePaginationVariables = (variables, page, pageSize) => {
         }
     };
     visit(cloned);
+
+    // If nothing was updated, add a shallow pagination hint commonly used by OT APIs
+    if (!updated) {
+        const offset = Math.max(0, (page - 1) * pageSize);
+        cloned.page = page;
+        cloned.pageNumber = page;
+        cloned.pageIndex = page;
+        cloned.offset = offset;
+        cloned.startIndex = offset;
+        cloned.skip = offset;
+        cloned.limit = pageSize;
+        cloned.pageSize = pageSize;
+        updated = true;
+    }
+
     return { variables: cloned, updated };
 };
 
@@ -284,6 +305,20 @@ const updatePaginationParams = (params, page, pageSize) => {
             updated = true;
         }
     }
+
+    // If nothing changed, inject common params
+    if (!updated) {
+        updatedParams.page = String(page);
+        updatedParams.pageIndex = String(page);
+        updatedParams.pageNumber = String(page);
+        updatedParams.startIndex = String(Math.max(0, (page - 1) * pageSize));
+        updatedParams.from = updatedParams.startIndex;
+        updatedParams.offset = updatedParams.startIndex;
+        updatedParams.limit = String(pageSize);
+        updatedParams.pageSize = String(pageSize);
+        updated = true;
+    }
+
     return { params: updatedParams, updated };
 };
 
@@ -1555,6 +1590,8 @@ try {
                         const currentStartIndex = parseInt(urlObj.searchParams.get('startIndex') || '0', 10);
                         const newStartIndex = currentStartIndex + 50; // OpenTable uses 50 per page
                         urlObj.searchParams.set('startIndex', String(newStartIndex));
+                        urlObj.searchParams.set('page', String((newStartIndex / 50) + 1));
+                        urlObj.searchParams.set('from', String(newStartIndex));
                         const nextUrl = urlObj.href;
                         if (nextUrl !== currentUrl) {
                             log.info(`Trying URL-based pagination with startIndex=${newStartIndex}`);
@@ -1565,6 +1602,26 @@ try {
                         }
                     } catch (e) {
                         log.warning(`URL-based pagination failed: ${e.message}`);
+                    }
+
+                    // Explicit page param fallback even if startIndex wasn't present
+                    try {
+                        const urlObj = new URL(currentUrl);
+                        const currentPage = parseInt(urlObj.searchParams.get('page') || '1', 10);
+                        const nextPage = Math.max(2, currentPage + 1);
+                        urlObj.searchParams.set('page', String(nextPage));
+                        urlObj.searchParams.set('startIndex', String((nextPage - 1) * 50));
+                        urlObj.searchParams.set('from', String((nextPage - 1) * 50));
+                        const nextUrl = urlObj.href;
+                        if (nextUrl !== currentUrl) {
+                            log.info(`Trying page-based pagination with page=${nextPage}`);
+                            await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
+                            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                            await page.waitForTimeout(1500);
+                            return true;
+                        }
+                    } catch (e) {
+                        log.warning(`Page-based pagination failed: ${e.message}`);
                     }
 
                     return false;
